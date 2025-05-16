@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Ugo Varetto
-# TODO: add error checking and async receive with timeout
+# TODO: add error checking and async receive with timeout, do not throw exceptions
 
 import os
 import subprocess as sub
