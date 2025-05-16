@@ -10,6 +10,7 @@ import socket
 import struct
 import sys
 import ipaddress
+import signal
 
 
 output_log : list[str] = []
@@ -119,7 +120,12 @@ def extract_ip_address(buffer: bytes):
 #
 #-------------------------------------------------------------------------------
 #
+def signal_handler(_, __):
+    print(output_log)
+    sys.exit(0)
+
 def main():
+    signal.signal(signal.SIGINT, signal_handler)
     #check if ray alreay active:
     if "ROCR_VISIBLE_DEVICES" in os.environ:
         os.environ.pop("ROCR_VISIBLE_DEVICES")
@@ -148,6 +154,8 @@ def main():
     parser.add_argument("--num-workers", type=int, help="Used by head node to wait until all workers are active")
                     
     ray_args, vllm_args = parser.parse_known_args() # known, unknown
+    #'unknown' are the parameters after `vllm serve'`
+    
     port : int = ray_args.port or 6379
     if not valid_port(port):
         print("Invalid port")
@@ -171,6 +179,10 @@ def main():
     if not valid_port(mcast_port):
         print("Invalid multicast port")
         sys.exit(1)
+
+    # sync head with nodes, head and workers can start in any order
+    # workers keep sending a broadcast message and wait for a response from the head node
+    # the head node replies to each worker with the ray port to use
     if head:
         sync_with_workers(mcast_address, mcast_port, ray_args.num_workers, port)
     else:
@@ -179,7 +191,8 @@ def main():
     head_address : str = ""
     if worker and not ray_args.head_address:
         head_address = mcast_address_receive(mcast_address, mcast_port)
-   
+  
+    # execute ray with the container
     execute_ray : list[str] = [ray_args.container_runner, "exec",  ray_args.vllm_container_image, "ray"]
 
     cmd_line : list[str] = []
@@ -188,7 +201,7 @@ def main():
     else:
         cmd_line = execute_ray + ['start', '--num-gpus', str(num_gpus), '--address', str(head_address)+ ":" + str(port)]
 
-    print(' '.join(cmd_line))
+    #print(' '.join(cmd_line))
     out : bytes = bytes()
     try:
         out = sub.check_output(cmd_line)
@@ -209,13 +222,31 @@ def main():
         for w in workers:
             print(w.decode('utf-8'))
 
-    
+    #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
-    #sub.call( \
-    #    [container_runner, "exec", -H", "$PWD", "--bind", '/tmp/app:/app', ray_args.vllm_container_image] + vllm_args)
-
-    ## Ready to launch vllm 
+    cwd : str = os.environ["PWD"]
+    vllm_cmdline : list[str] = [ray_args.container_runner, "exec", "-H", cwd, 
+                                ray_args.vllm_container_image, "vllm", "serve"] + vllm_args
+    print(' '.join(vllm_cmdline))
+    if head:
+        try:
+            out = sub.check_output(vllm_cmdline)
+            print("Started!")
+        except Exception as e:
+            print("Error running vLLM")
+            print(e)
+            sys.exit(1)
 
 #-------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
+
+# with -H $PWD it works with Singularity & Apptainer, if not the following error is reported:
+# AttributeError: /opt/rocm/lib/libamd_smi.so: undefined symbol: amdsmi_get_gpu_enumeration_info
+# -H, --home string                   a home directory specification. spec
+#                                       can either be a src path or src:dest
+#                                       pair. src is the source path of the
+#                                       home directory outside the container
+#                                       and dest overrides the home
+#                                       directory within the container.
+# vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray
