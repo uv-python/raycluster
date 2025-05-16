@@ -197,20 +197,21 @@ def main():
 
     cmd_line : list[str] = []
     if head:
-        cmd_line = execute_ray + ['start', '--head', '--port', str(port) , '--num-gpus', str(num_gpus)]
+        cmd_line = execute_ray + ['start', '--head', '--port', str(port) , '--num-gpus', str(num_gpus), "--dashboard-host", "0.0.0.0"]
     else:
         cmd_line = execute_ray + ['start', '--num-gpus', str(num_gpus), '--address', str(head_address)+ ":" + str(port)]
 
     #print(' '.join(cmd_line))
     out : bytes = bytes()
     try:
-        out = sub.check_output(cmd_line)
+        out = sub.run(cmd_line, capture_output=True).stdout#sub.check_output(cmd_line)
         output_log.append(remove_ansi_escape_chars(out))
     except Exception as e:
         print(e)
         sys.exit(1)
 
     local_ip : str = extract_ip_address(out)
+    print(f"IP Address: {local_ip}")
     if head and ray_args.broadcast:
         broadcast_ip_address(local_ip, mcast_address, mcast_port)
 
@@ -227,8 +228,9 @@ def main():
     cwd : str = os.environ["PWD"]
     vllm_cmdline : list[str] = [ray_args.container_runner, "exec", "-H", cwd, 
                                 ray_args.vllm_container_image, "vllm", "serve"] + vllm_args
-    print(' '.join(vllm_cmdline))
+    
     if head:
+        print(' '.join(vllm_cmdline))
         try:
             out = sub.check_output(vllm_cmdline)
             print("Started!")
