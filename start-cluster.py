@@ -266,6 +266,8 @@ def main():
     out : bytes = bytes()
     try:
         out = sub.check_output(cmd_line)
+        print(remove_ansi_escape_chars(out))
+        
     except Exception as e:
         abort(str(e))
 
@@ -306,8 +308,8 @@ def main():
  
 # 8. Launch vllm fir parameters specified
         
-    # if not arguments for vllm, do not launch vllm and exit
-    if not vllm_args:
+    # if no arguments for vllm or worker do not launch vllm and exit
+    if not vllm_args or worker:
         sys.exit(0)
     #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
@@ -328,7 +330,7 @@ def main():
         if ray_args.hf_dir:
             vllm_cmdline += ['-v', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
     else:
-        print(f"Could not map /app and /huggingface path, unknown container '{ray_args.container_runner}'")
+        print(f"Could not map /app and /huggingface path, unknown container type '{ray_args.container_runner}'")
     
     if head:
         print(' '.join(vllm_cmdline))
