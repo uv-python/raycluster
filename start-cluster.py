@@ -150,7 +150,8 @@ def main():
                                                                   "specified for the head node. The container is used to start both " \
                                                                   "Ray and vLLM; if no extrea command line parameters beyond the ones" \
                                                                   "required for ray are specified, vLLM is not run.\n" \
-                                                                  "The command line parameters are passed to 'vllm serve'")
+                                                                  "The command line parameters are passed to 'vllm serve'" \
+                                                                  "'--distributed-executor-backend ray' is added to the 'vllm serve' command line")
     parser.add_argument("container_runner", help="Container runner, Singularity, Apptainer, Podman...")
     parser.add_argument("container_image", help="Path to container must contain Ray and if additinal ")
     parser.add_argument("--num-gpus", type=int, help="Number of GPUs")
@@ -243,7 +244,7 @@ def main():
     # vllm_cmdline : list[str] = [ray_args.container_runner, "exec", "-H", cwd, # is -H needed?
     #                             ray_args.container_image, "vllm", "serve"] + vllm_args
     vllm_cmdline : list[str] = [ray_args.container_runner, "exec",
-                                ray_args.container_image, "vllm", "serve"] + vllm_args
+                                ray_args.container_image, "vllm", "serve", "--distributed-executor-backend", "ray"] + vllm_args
     if ray_args.container_runner in ["singularity", "apptainer"]:
         if ray_args.app:
             vllm_cmdline += ['--bind', ray_args.app + ":" + "/app"]
