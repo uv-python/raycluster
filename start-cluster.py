@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Author: Ugo Varetto
-# TODO: add error checking and async receive with timeout, do not throw exceptions
+# TODO: add error checking and async receive with timeout, 
+#       do not throw exceptions, add mapping of /app and /huggingfgace folders
 
 import os
 import subprocess as sub
@@ -15,6 +16,10 @@ import signal
 
 output_log : list[str] = []
 workers : set[bytes] = set()
+
+def abort(msg: str, exit_code: int =1) -> None:
+    print(msg, sys.stderr)
+    sys.exit(exit_code)
 
 def valid_ip_address(addr: str) -> bool:
     try:
@@ -31,8 +36,7 @@ def notify_client(client: str, port: int, ray_port: int) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.sendto(bytes(str(ray_port), 'utf-8'), (client, port))
     except:
-        print("Error creating socket")
-        sys.exit(1)
+        abort("Error creating socket")
 
 
 def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: int) -> None:
@@ -43,6 +47,10 @@ def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: i
         mreq = struct.pack("4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         w = set()
+        # at each iteration a message from a worker is received; because the same
+        # worker might be sending more than one message a 'set' is used to record
+        # which workers have already notified the head node to ensure one unique
+        # entry is stored
         while len(w) != num_workers:
             client = sock.recv(64)
             notify_client(client.decode('utf-8'), port+1, ray_port);
@@ -50,8 +58,7 @@ def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: i
         global workers
         workers = w
     except:
-        print("Error synchronising with workers")
-        sys.exit(1)
+        abort("Error synchronising with workers")
 
 def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
     try:
@@ -64,6 +71,10 @@ def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
         sock2.setblocking(False);
         done = False
         rayport : bytes = bytes()
+        # at each iteration a new broadcast message is sent and an attempt
+        # at receiving a response from the head node is performed.
+        # if the recvfrom call fails an exception is thrown, hence the need
+        # for a try/except block
         while not done:
             sock.sendto(msg.encode(), (mcast_group, port))
             try:
@@ -74,11 +85,10 @@ def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
                 pass
         return int(rayport.decode('utf-8'))
     except Exception as e:
-        print("Error synchronising with head node")
-        print(e)
-        sys.exit(1)
+        abort("Error synchronising with head node\n" + str(e))
+        return 0 # lsp tool does not understand that abort terminates the program
 
-def mcast_address_receive(mcast_group: str, port: int):
+def mcast_address_receive(mcast_group: str, port: int) -> str:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -87,8 +97,8 @@ def mcast_address_receive(mcast_group: str, port: int):
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         return sock.recv(128).decode('utf-8')
     except:
-        print("Error receiving messages from workers")
-        sys.exit(1)
+        abort("Error receiving messages from workers")
+        return "" # lsp tool does not understand that abort terminates the program
 
 def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3):
     try:
@@ -96,9 +106,7 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3):
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
         sock.sendto(ip.encode(), (mcast_group, port))
     except:
-        print("Error broadcasting messages")
-        sys.exit(1)
-
+        abort("Error broadcasting messages")
 
 def remove_ansi_escape_chars(buffer) -> str:
     ansi_escape = re.compile(r'\x1b[^m]+m')
@@ -109,18 +117,18 @@ def remove_ansi_escape_chars(buffer) -> str:
     except:
         return ""
 
-def extract_ip_address(buffer: bytes):
+def extract_ip_address(buffer: bytes) -> str:
     ansi_escape = re.compile(r'\x1b[^m]+m')
     t : list[str] = []
     try:
         t = ansi_escape.sub('', buffer.decode('utf-8')).split()
     except:
         return ""
-    return t[t.index('IP:')+1]
+    return t[t.index('IP:') + 1]
 #
 #-------------------------------------------------------------------------------
 #
-def signal_handler(_, __):
+def signal_handler(_, __) -> None:
     print(output_log)
     sys.exit(0)
 
@@ -136,12 +144,14 @@ def main():
     except:
         pass
     # Parse arguments
-    parser = argparse.ArgumentParser(prog="run-ray-cluster", description="Run vllM container, workers and head nodes " \
+    parser = argparse.ArgumentParser(prog="start-cluster", description="Run Ray and vllM container, workers and head nodes " \
                                                                   "can be started independently and the port needs only be " \
                                                                   "specified for the head node. The container is used to start both " \
-                                                                  "Ray and vLLM")
+                                                                  "Ray and vLLM; if no extrea command line parameters beyond the ones" \
+                                                                  "required for ray are specified, vLLM is not run.\n" \
+                                                                  "The command line parameters are passed to 'vllm serve'")
     parser.add_argument("container_runner", help="Container runner, Singularity, Apptainer, Podman...")
-    parser.add_argument("vllm_container_image", help="Path to vLLM container")
+    parser.add_argument("container_image", help="Path to container must contain Ray and if additinal ")
     parser.add_argument("--num-gpus", type=int, help="Number of GPUs")
     parser.add_argument("--head", const=True, nargs='?', help="Head node")
     parser.add_argument("--worker", const=True, nargs='?', help="Worker node")
@@ -152,6 +162,8 @@ def main():
     parser.add_argument("--mcast-port", help="Multicast port, default is 5001")
     parser.add_argument("--broadcast", const=True, nargs='?', help="Have head node broadcast IP address through IP multicast")
     parser.add_argument("--num-workers", type=int, help="Used by head node to wait until all workers are active")
+    parser.add_argument("--app-dir", help="Local directory mapping /app")
+    parser.add_argument("--hf-dir", help="Local mapping of Huggingface /root/.cache/hugingface directory")
                     
     ray_args, vllm_args = parser.parse_known_args() # known, unknown
     #'unknown' are the parameters after `vllm serve'`
@@ -165,20 +177,19 @@ def main():
     worker : bool = ray_args.worker or False
     num_gpus : int = ray_args.num_gpus or 0
     if head and not ray_args.num_workers:
-        raise AttributeError("When --head specified --num-workers is required because the head node needs to know " \
-                             "how many workers it needs to wait for")
+        abort("When --head specified --num-workers is required because the head node needs to know " \
+              "how many workers it needs to wait for")
     if not head and not worker:
-        raise AttributeError("Either --head or --worker needs to be specified")
+        abort("Either --head or --worker needs to be specified")
     if head and worker:
-        raise AttributeError("Only one of --head or --worked must be specified")
+        abort("Only one of --head or --worked must be specified")
     mcast_address : str = ray_args.mcast_address or "224.0.0.100" # non routable
     mcast_port : int = ray_args.mcast_port or 5001
     if not valid_ip_address(mcast_address):
-        print("Invalid multicast ip address")
-        sys.exit(1)
+        abort("Invalid multicast ip address")
+        
     if not valid_port(mcast_port):
-        print("Invalid multicast port")
-        sys.exit(1)
+        abort("Invalid multicast port")
 
     # sync head with nodes, head and workers can start in any order
     # workers keep sending a broadcast message and wait for a response from the head node
@@ -193,7 +204,7 @@ def main():
         head_address = mcast_address_receive(mcast_address, mcast_port)
   
     # execute ray with the container
-    execute_ray : list[str] = [ray_args.container_runner, "exec",  ray_args.vllm_container_image, "ray"]
+    execute_ray : list[str] = [ray_args.container_runner, "exec",  ray_args.container_image, "ray"]
 
     cmd_line : list[str] = []
     if head:
@@ -207,8 +218,7 @@ def main():
         out = sub.run(cmd_line, capture_output=True).stdout#sub.check_output(cmd_line)
         output_log.append(remove_ansi_escape_chars(out))
     except Exception as e:
-        print(e)
-        sys.exit(1)
+        abort(str(e))
 
     local_ip : str = extract_ip_address(out)
     print(f"IP Address: {local_ip}")
@@ -222,12 +232,24 @@ def main():
         print("=" * 10)
         for w in workers:
             print(w.decode('utf-8'))
-
+    
+    # if not arguments for vllm, do not launch vllm and exit
+    if not vllm_args:
+        sys.exit(0)
     #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
     cwd : str = os.environ["PWD"]
-    vllm_cmdline : list[str] = [ray_args.container_runner, "exec", "-H", cwd, 
-                                ray_args.vllm_container_image, "vllm", "serve"] + vllm_args
+    # vllm_cmdline : list[str] = [ray_args.container_runner, "exec", "-H", cwd, # is -H needed?
+    #                             ray_args.container_image, "vllm", "serve"] + vllm_args
+    vllm_cmdline : list[str] = [ray_args.container_runner, "exec",
+                                ray_args.container_image, "vllm", "serve"] + vllm_args
+    if ray_args.container_runner in ["singularity", "apptainer"]:
+        if ray_args.app:
+            vllm_cmdline += ['--bind', ray_args.app + ":" + "/app"]
+        if ray_args.hf_dir:
+            vllm_cmdline += ['--bind', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
+    else:
+        print("WARNING /app and /huggingface mapping only supported for Singularity and Apptainer")
     
     if head:
         print(' '.join(vllm_cmdline))
@@ -243,12 +265,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# with -H $PWD it works with Singularity & Apptainer, if not the following error is reported:
-# AttributeError: /opt/rocm/lib/libamd_smi.so: undefined symbol: amdsmi_get_gpu_enumeration_info
-# -H, --home string                   a home directory specification. spec
-#                                       can either be a src path or src:dest
-#                                       pair. src is the source path of the
-#                                       home directory outside the container
-#                                       and dest overrides the home
-#                                       directory within the container.
 # vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray
