@@ -222,6 +222,8 @@ def main():
     parser.add_argument("--num-workers", type=int, help="Used by head node to wait until all workers are active")
     parser.add_argument("--app-dir", help="Local directory mapping /app")
     parser.add_argument("--hf-dir", help="Local mapping of Huggingface /root/.cache/hugingface directory")
+    parser.add_argument("--dashboard", const=True, nargs='?', 
+                        help="Enable Ray dashboard by installing the proper version of Ray and additional packages through pip")
                     
     ray_args, vllm_args = parser.parse_known_args() # known, unknown
     #'unknown' are the parameters after `vllm serve'`
@@ -249,6 +251,9 @@ def main():
     if not valid_port(mcast_port):
         abort("Invalid multicast port")
 
+# 2.1 Optionally install dashboard
+    if head and ray_args.dashboard:
+        sub.call([ray_args.container_runner, 'exec', ray_args.container_image, 'pip', 'install', 'ray[default]', 'py-spy', 'memray'])
 # 3. Sync workers with head
 
     # sync head with workers, head and workers can start in any order
@@ -270,7 +275,9 @@ def main():
 
     cmd_line : list[str] = []
     if head:
-        cmd_line = execute_ray + ['start', '--head', '--port', str(port) , '--num-gpus', str(num_gpus), "--dashboard-host", "0.0.0.0"]
+        cmd_line = execute_ray + ['start', '--head', '--port', str(port) , '--num-gpus', str(num_gpus)]
+        if ray_args.dashboard:
+            cmd_line += ["--dashboard-host", "0.0.0.0"]
     else:
         cmd_line = execute_ray + ['start', '--num-gpus', str(num_gpus), '--address', str(head_address)+ ":" + str(port)]
 
