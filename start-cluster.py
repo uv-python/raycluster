@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
 # TODO: add error checking and async receive with timeout, 
 #       do not throw exceptions, add mapping of /app and /huggingfgace folders
