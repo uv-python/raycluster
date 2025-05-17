@@ -1,9 +1,32 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
-# TODO: add error checking and async receive with timeout, 
+# TODO: consider adding timeouts for sync operations, 
 #       do not throw exceptions, add mapping of /app and /huggingfgace folders
+"""
+This script allows launching containers for Ray and optionally vLLM.
+Ideally you should run the same version of Ray contained in the vLLM container
+to avoid problems.
+For AMD GPUs: make sure the amdgpu python package is NOT visible when running this script.
+It is possible to launch workers and head processes in any order:
+    * the worker processes start then keep broadcas messages with their own IP address
+      until they receive a response form the head node containing the TCP port to connect to;
+    * the worker process receives a messag from the head process and then waits until it receives
+      the IP address of the node to connect to;
+    * the head process starts and waits until it has finished receiving messages from all
+      the workers to which it replies with the port to connect to;
+    * the head process starts the Ray process and then sends a multicast message containing
+      the IP address to connect to;
+    * after all processes are started the head node runs vLLM if 'vllm serve' command line
+      parameters are specified on the command line.
 
+
+It is possible to specify both port and multicast group; the default multicast group is
+224.0.0.100 making it non-routable.
+All the command line parameters are documented, just run the script with  --help to see a list.
+
+The script has been so far used only with Singularity and Apptainer on HPE/Cray systems.
+"""
 import os
 import subprocess as sub
 import argparse
@@ -119,6 +142,8 @@ def remove_ansi_escape_chars(buffer) -> str:
         return ""
 
 def extract_ip_address(buffer: bytes) -> str:
+    #Doesn't work when more than one IP address in the same subnet
+    #return socket.gethostbyname(socket.getfqdn());
     ansi_escape = re.compile(r'\x1b[^m]+m')
     t : list[str] = []
     try:
@@ -152,7 +177,7 @@ def main():
                                                                   "required for ray are specified, vLLM is not run.\n" \
                                                                   "The command line parameters are passed to 'vllm serve'" \
                                                                   "'--distributed-executor-backend ray' is added to the 'vllm serve' command line")
-    parser.add_argument("container_runner", help="Container runner, Singularity, Apptainer, Podman...")
+    parser.add_argument("container_runner", help="Container runner, Singularity, Apptainer, Podmason...")
     parser.add_argument("container_image", help="Path to container must contain Ray and if additinal ")
     parser.add_argument("--num-gpus", type=int, help="Number of GPUs")
     parser.add_argument("--head", const=True, nargs='?', help="Head node")
@@ -245,8 +270,8 @@ def main():
     #                             ray_args.container_image, "vllm", "serve"] + vllm_args
     vllm_cmdline : list[str] = [ray_args.container_runner, "exec",
                                 ray_args.container_image, "vllm", "serve", "--distributed-executor-backend", "ray"] + vllm_args
-    if ray_args.container_runner in ["singularity", "apptainer"]:
-        if ray_args.app:
+    if ray_args.container_runner in ("singularity", "apptainer"):
+        if ray_args.app_dir:
             vllm_cmdline += ['--bind', ray_args.app + ":" + "/app"]
         if ray_args.hf_dir:
             vllm_cmdline += ['--bind', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
@@ -256,7 +281,7 @@ def main():
     if head:
         print(' '.join(vllm_cmdline))
         try:
-            out = sub.check_output(vllm_cmdline)
+            sub.call(vllm_cmdline)
             print("Started!")
         except Exception as e:
             print("Error running vLLM")
