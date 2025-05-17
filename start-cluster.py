@@ -27,7 +27,20 @@ It is possible to specify both port and multicast group; the default multicast g
 224.0.0.100 making it non-routable.
 All the command line parameters are documented, just run the script with  --help to see a list.
 
-The script has been so far used only with Singularity and Apptainer on HPE/Cray systems.
+The script has been so far used only with Singularity and Apptainer on HPE/Cray systems but
+nothing is specific to the environment so it should work on any Linux cluster.
+
+Example:
+
+Run on head node, two nodes, one worker, one head, 8 GPUs per node:
+```
+./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --head --num-gpus 8 \
+   --broadcast --num-workers 1 Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
+```
+Run on worker node:
+```
+./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --worker --num-gpus 8
+```
 """
 import os
 import subprocess as sub
@@ -38,7 +51,7 @@ import struct
 import sys
 import ipaddress
 
-
+# Workers' IP address
 workers : set[bytes] = set()
 
 # IP address rad from Ray outputj
@@ -137,7 +150,7 @@ def mcast_address_receive(mcast_group: str, port: int) -> str:
     finally:
         sock.close()
 
-def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3):
+def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> None:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
@@ -206,7 +219,6 @@ def main():
                                           "if not specified UDP multicast will be used ")
     parser.add_argument("--mcast-address", help="Multicast address, default is 224.0.0.100")
     parser.add_argument("--mcast-port", help="Multicast port, default is 5001")
-    parser.add_argument("--broadcast", const=True, nargs='?', help="Have head node broadcast IP address through IP multicast")
     parser.add_argument("--num-workers", type=int, help="Used by head node to wait until all workers are active")
     parser.add_argument("--app-dir", help="Local directory mapping /app")
     parser.add_argument("--hf-dir", help="Local mapping of Huggingface /root/.cache/hugingface directory")
@@ -280,7 +292,7 @@ def main():
 
 # 5. Broadcast IP address of head process
     
-    if head and ray_args.broadcast:
+    if head:
         broadcast_ip_address(local_ip, mcast_address, mcast_port)
 
 # 6. Re-sync
