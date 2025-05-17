@@ -9,17 +9,19 @@ Ideally you should run the same version of Ray contained in the vLLM container
 to avoid problems.
 For AMD GPUs: make sure the amdgpu python package is NOT visible when running this script.
 It is possible to launch workers and head processes in any order:
-    * the worker processes start then keep broadcas messages with their own IP address
-      until they receive a response form the head node containing the TCP port to connect to;
-    * the worker process receives a messag from the head process and then waits until it receives
-      the IP address of the node to connect to;
-    * the head process starts and waits until it has finished receiving messages from all
-      the workers to which it replies with the port to connect to;
-    * the head process starts the Ray process and then sends a multicast message containing
-      the IP address to connect to;
-    * after all processes are started the head node runs vLLM if 'vllm serve' command line
-      parameters are specified on the command line.
-
+    1. the worker processes start then keep broadcas messages with their own IP address
+       until they receive a response form the head node containing the TCP port to connect to;
+    2. the worker process receives a messag from the head process and then waits until it receives
+       the IP address of the node to connect to;
+    3. the head process starts and waits until it has finished receiving messages from all
+       the workers to which it replies with the port to connect to;
+    4. the head process starts the Ray process and then sends a multicast message containing
+       the IP address to connect to;
+    5. after all the process are started another synchronisation step is performend after the
+       Ray processes are started by both the workers and the head node to ensure the Ray
+       cluster is up and running before running anything else;
+    6. the head node runs vLLM if 'vllm serve' command line parameters are specified on 
+       the command line.
 
 It is possible to specify both port and multicast group; the default multicast group is
 224.0.0.100 making it non-routable.
@@ -35,11 +37,12 @@ import socket
 import struct
 import sys
 import ipaddress
-import signal
 
 
-output_log : list[str] = []
 workers : set[bytes] = set()
+
+# IP address rad from Ray outputj
+ray_ip_address : str = ""
 
 def abort(msg: str, exit_code: int =1) -> None:
     print(msg, sys.stderr)
@@ -83,12 +86,17 @@ def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: i
         workers = w
     except:
         abort("Error synchronising with workers")
+    finally:
+        sock.close()
 
 def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-        msg=socket.gethostbyname(socket.getfqdn());
+        # Sync happens twice once before launching Ray, when ray_ip_address in empty
+        # and once after Ray is started when ray_ip_address contains the IP extracted from
+        # Ray's output.
+        msg= socket.gethostbyname(socket.getfqdn()) if not ray_ip_address else ray_ip_address
 
         sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock2.bind(("0.0.0.0", port+1))
@@ -111,6 +119,9 @@ def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
     except Exception as e:
         abort("Error synchronising with head node\n" + str(e))
         return 0 # lsp tool does not understand that abort terminates the program
+    finally:
+        sock.close()
+        sock.close()
 
 def mcast_address_receive(mcast_group: str, port: int) -> str:
     try:
@@ -123,6 +134,8 @@ def mcast_address_receive(mcast_group: str, port: int) -> str:
     except:
         abort("Error receiving messages from workers")
         return "" # lsp tool does not understand that abort terminates the program
+    finally:
+        sock.close()
 
 def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3):
     try:
@@ -131,8 +144,11 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3):
         sock.sendto(ip.encode(), (mcast_group, port))
     except:
         abort("Error broadcasting messages")
+    finally:
+        sock.close()
 
 def remove_ansi_escape_chars(buffer) -> str:
+
     ansi_escape = re.compile(r'\x1b[^m]+m')
     t : str = "" 
     try:
@@ -142,6 +158,10 @@ def remove_ansi_escape_chars(buffer) -> str:
         return ""
 
 def extract_ip_address(buffer: bytes) -> str:
+    """ Parse Ray output text and extract IP address.
+    `gethostbyname` won't work when there are multiple IP addresses
+    bound to the same node.
+    """
     #Doesn't work when more than one IP address in the same subnet
     #return socket.gethostbyname(socket.getfqdn());
     ansi_escape = re.compile(r'\x1b[^m]+m')
@@ -154,12 +174,10 @@ def extract_ip_address(buffer: bytes) -> str:
 #
 #-------------------------------------------------------------------------------
 #
-def signal_handler(_, __) -> None:
-    print(output_log)
-    sys.exit(0)
 
 def main():
-    signal.signal(signal.SIGINT, signal_handler)
+
+# 1. Confugure environment
     #check if ray alreay active:
     if "ROCR_VISIBLE_DEVICES" in os.environ:
         os.environ.pop("ROCR_VISIBLE_DEVICES")
@@ -169,11 +187,12 @@ def main():
         sys.exit(1)
     except:
         pass
-    # Parse arguments
-    parser = argparse.ArgumentParser(prog="start-cluster", description="Run Ray and vllM container, workers and head nodes " \
-                                                                  "can be started independently and the port needs only be " \
-                                                                  "specified for the head node. The container is used to start both " \
-                                                                  "Ray and vLLM; if no extrea command line parameters beyond the ones" \
+
+# 2. Parse arguments
+    parser = argparse.ArgumentParser(prog="start-cluster", description="Run Ray and vllM containers; workers and head processes" \
+                                                                  "can be started independently in any order and the port needs only be " \
+                                                                  "specified for the head node. The same container is used to start both " \
+                                                                  "Ray and vLLM; if no extra command line parameters beyond the ones" \
                                                                   "required for ray are specified, vLLM is not run.\n" \
                                                                   "The command line parameters are passed to 'vllm serve'" \
                                                                   "'--distributed-executor-backend ray' is added to the 'vllm serve' command line")
@@ -218,7 +237,9 @@ def main():
     if not valid_port(mcast_port):
         abort("Invalid multicast port")
 
-    # sync head with nodes, head and workers can start in any order
+# 3. Sync workers with head
+
+    # sync head with workers, head and workers can start in any order
     # workers keep sending a broadcast message and wait for a response from the head node
     # the head node replies to each worker with the ray port to use
     if head:
@@ -229,7 +250,9 @@ def main():
     head_address : str = ""
     if worker and not ray_args.head_address:
         head_address = mcast_address_receive(mcast_address, mcast_port)
-  
+
+# 4. Run Ray
+
     # execute ray with the container
     execute_ray : list[str] = [ray_args.container_runner, "exec",  ray_args.container_image, "ray"]
 
@@ -242,16 +265,37 @@ def main():
     #print(' '.join(cmd_line))
     out : bytes = bytes()
     try:
-        out = sub.run(cmd_line, capture_output=True).stdout#sub.check_output(cmd_line)
-        output_log.append(remove_ansi_escape_chars(out))
+        out = sub.check_output(cmd_line)
     except Exception as e:
         abort(str(e))
 
+# 4.1 Rxtract IP address
+
     local_ip : str = extract_ip_address(out)
     print(f"IP Address: {local_ip}")
+    global ray_ip_address
+    ray_ip_address = local_ip
+
+# 5. Broadcast IP address of head process
+    
     if head and ray_args.broadcast:
         broadcast_ip_address(local_ip, mcast_address, mcast_port)
 
+# 6. Re-sync
+    
+    # At this point, we know that all the worker processes have started but we do not know if
+    # each process has started the Ray process and therefore we need to sync again:
+    # we need to exit the program only after we are sure that all Ray's worker and head processes
+    # have started.
+    # This time the worker and head processeswill send a messagesto after Ray has been started.
+    # Instead of write additional code we can reuse what implemented above.
+
+    if head:
+        sync_with_workers(mcast_address, mcast_port, ray_args.num_workers, port)
+    else:
+        _ = sync_with_head(mcast_address, mcast_port)
+
+# 7. Print IP addresses
     if worker:
         print(f"Head node address: {head_address}")
     else:
@@ -259,24 +303,32 @@ def main():
         print("=" * 10)
         for w in workers:
             print(w.decode('utf-8'))
-    
+ 
+# 8. Launch vllm fir parameters specified
+        
     # if not arguments for vllm, do not launch vllm and exit
     if not vllm_args:
         sys.exit(0)
     #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
     cwd : str = os.environ["PWD"]
-    # vllm_cmdline : list[str] = [ray_args.container_runner, "exec", "-H", cwd, # is -H needed?
-    #                             ray_args.container_image, "vllm", "serve"] + vllm_args
     vllm_cmdline : list[str] = [ray_args.container_runner, "exec",
-                                ray_args.container_image, "vllm", "serve", "--distributed-executor-backend", "ray"] + vllm_args
+                                ray_args.container_image, "vllm",
+                                "serve", "--distributed-executor-backend", "ray"] + vllm_args
+    
+    # optionally mount paths
     if ray_args.container_runner in ("singularity", "apptainer"):
         if ray_args.app_dir:
             vllm_cmdline += ['--bind', ray_args.app + ":" + "/app"]
         if ray_args.hf_dir:
             vllm_cmdline += ['--bind', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
+    elif ray_args.container_runner in ('podman', 'docker'):
+        if ray_args.app_dir:
+            vllm_cmdline += ['-v', ray_args.app + ":" + "/app"]
+        if ray_args.hf_dir:
+            vllm_cmdline += ['-v', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
     else:
-        print("WARNING /app and /huggingface mapping only supported for Singularity and Apptainer")
+        print(f"Could not map /app and /huggingface path, unknown container '{ray_args.container_runner}'")
     
     if head:
         print(' '.join(vllm_cmdline))
