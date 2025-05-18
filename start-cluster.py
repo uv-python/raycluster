@@ -50,6 +50,7 @@ import socket
 import struct
 import sys
 import ipaddress
+import signal
 
 # Workers' IP address
 workers : set[bytes] = set()
@@ -184,13 +185,33 @@ def extract_ip_address(buffer: bytes) -> str:
     except:
         return ""
     return t[t.index('IP:') + 1]
+
+
+def slurm_nodelist() -> tuple[bool, list[str]]: # return <OK | NOT OK, value>
+    OK : bool = True
+    if not "SLURM_JOB_NODELIST" in os.environ:
+        return (not OK, False)
+    r = re.compile(r"nid\[([^\]]+)\]")
+    result = r.search(os.environ["SLURM_JOB_NODELIST"])
+    try:
+        n = result.group(1)
+        return (OK, sorted(n.split(',')))
+    except:
+        return (not OK, [])
+
+def is_head_from_slurm_nodelist(nodelist: list[str]) -> bool:
+    return ('nid' + nodelist[0]) == socket.gethostname()
+
+def num_workers_from_slurm_nodelist(nodelist: list[str]) -> int:
+    return len(nodelist) - 1 # one is the head process
+
 #
 #-------------------------------------------------------------------------------
 #
 
 def main():
 
-# 1. Confugure environment
+# 1. Configure environment
     #check if ray alreay active:
     if "ROCR_VISIBLE_DEVICES" in os.environ:
         os.environ.pop("ROCR_VISIBLE_DEVICES")
@@ -200,6 +221,8 @@ def main():
         sys.exit(1)
     except:
         pass
+    
+    hostname = socket.gethostname()
 
 # 2. Parse arguments
     parser = argparse.ArgumentParser(prog="start-cluster", description="Run Ray and vllM containers; workers and head processes" \
@@ -213,10 +236,7 @@ def main():
     parser.add_argument("container_image", help="Path to container must contain Ray and if additinal ")
     parser.add_argument("--num-gpus", type=int, help="Number of GPUs")
     parser.add_argument("--head", const=True, nargs='?', help="Head node")
-    parser.add_argument("--worker", const=True, nargs='?', help="Worker node")
     parser.add_argument("--port", type=int, help="Ray TCP port, for head only, workers will receive port from head")
-    parser.add_argument("--head-address", help="IP address of the head node for workers" \
-                                          "if not specified UDP multicast will be used ")
     parser.add_argument("--mcast-address", help="Multicast address, default is 224.0.0.100")
     parser.add_argument("--mcast-port", help="Multicast port, default is 5001")
     parser.add_argument("--num-workers", type=int, help="Used by head node to wait until all workers are active")
@@ -224,25 +244,39 @@ def main():
     parser.add_argument("--hf-dir", help="Local mapping of Huggingface /root/.cache/hugingface directory")
     parser.add_argument("--dashboard", const=True, nargs='?', 
                         help="Enable Ray dashboard by installing the proper version of Ray and additional packages through pip")
+    parser.add_argument("--slurm", const=True, nargs='?', help="Automatically select head node and workers")
                     
     ray_args, vllm_args = parser.parse_known_args() # known, unknown
     #'unknown' are the parameters after `vllm serve'`
     
     port : int = ray_args.port or 6379
     if not valid_port(port):
-        print("Invalid port")
-        sys.exit(1)
+        abort("Invalid port")
 
-    head : bool = ray_args.head or False
-    worker : bool = ray_args.worker or False
+    head : bool = False
+    worker : bool  = False
+    num_workers : int = 0
+    if ray_args.slurm:
+        print("Autodetecting head and workers...")
+        ok, nodes = slurm_nodelist() 
+        if not ok:
+            abort("Cannot retrieve SLURM nodelist")
+        head = is_head_from_slurm_nodelist(nodes)
+        worker = not head
+        num_workers = num_workers_from_slurm_nodelist(nodes)
+        if head:
+            print(f"Head is: {hostname}")
+            print(f"{num_workers} workers")
+
+    else:
+        head : bool = ray_args.head or False
+        worker : bool = not head 
+        if head and not ray_args.num_workers:
+            abort("When --head specified --num-workers is required because the head node needs to know " \
+                  "how many workers it needs to wait for")
+        num_workers = ray_args.num_workers 
+
     num_gpus : int = ray_args.num_gpus or 0
-    if head and not ray_args.num_workers:
-        abort("When --head specified --num-workers is required because the head node needs to know " \
-              "how many workers it needs to wait for")
-    if not head and not worker:
-        abort("Either --head or --worker needs to be specified")
-    if head and worker:
-        abort("Only one of --head or --worked must be specified")
     mcast_address : str = ray_args.mcast_address or "224.0.0.100" # non routable
     mcast_port : int = ray_args.mcast_port or 5001
     if not valid_ip_address(mcast_address):
@@ -254,18 +288,19 @@ def main():
 # 2.1 Optionally install dashboard
     if head and ray_args.dashboard:
         sub.call([ray_args.container_runner, 'exec', ray_args.container_image, 'pip', 'install', 'ray[default]', 'py-spy', 'memray'])
+# 
 # 3. Sync workers with head
 
     # sync head with workers, head and workers can start in any order
     # workers keep sending a broadcast message and wait for a response from the head node
     # the head node replies to each worker with the ray port to use
     if head:
-        sync_with_workers(mcast_address, mcast_port, ray_args.num_workers, port)
+        sync_with_workers(mcast_address, mcast_port, num_workers, port)
     else:
         port = sync_with_head(mcast_address, mcast_port)
     
     head_address : str = ""
-    if worker and not ray_args.head_address:
+    if worker:
         head_address = mcast_address_receive(mcast_address, mcast_port)
 
 # 4. Run Ray
@@ -278,6 +313,8 @@ def main():
         cmd_line = execute_ray + ['start', '--head', '--port', str(port) , '--num-gpus', str(num_gpus)]
         if ray_args.dashboard:
             cmd_line += ["--dashboard-host", "0.0.0.0"]
+        else:
+            cmd_line += ["--include-dashboard=False"]
     else:
         cmd_line = execute_ray + ['start', '--num-gpus', str(num_gpus), '--address', str(head_address)+ ":" + str(port)]
 
@@ -290,7 +327,7 @@ def main():
     except Exception as e:
         abort(str(e))
 
-# 4.1 Rxtract IP address
+# 4.1 Extract IP address
 
     local_ip : str = extract_ip_address(out)
     print(f"IP Address: {local_ip}")
@@ -312,7 +349,7 @@ def main():
     # Instead of write additional code we can reuse what implemented above.
 
     if head:
-        sync_with_workers(mcast_address, mcast_port, ray_args.num_workers, port)
+        sync_with_workers(mcast_address, mcast_port, num_workers, port)
     else:
         _ = sync_with_head(mcast_address, mcast_port)
 
@@ -325,11 +362,13 @@ def main():
         for w in workers:
             print(w.decode('utf-8'))
  
-# 8. Launch vllm fir parameters specified
+# 8. Launch vllm if parameters specified
         
     # if no arguments for vllm or worker do not launch vllm and exit
     if not vllm_args or worker:
-        sys.exit(0)
+        print(f"Worker @{hostname} stopping")
+        os.kill(os.getpid(), signal.SIGSTOP)
+    sub.call([ray_args.container_runner, 'exec', ray_args.container_image, 'ray', 'status'])
     #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
     cwd : str = os.environ["PWD"]
