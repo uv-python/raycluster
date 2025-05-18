@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
 # TODO: consider adding timeouts for sync operations, 
-#       do not throw exceptions, add mapping of /app and /huggingfgace folders
+#       when running in SLURM:
+#           * Add notifier process which either execute scripts or saves file with name
+#             <job id>--<head node name>--<head node ip address>--<vllm port>
+#           * Add option to specify script to run on the command line
+        
 """
 This script allows launching containers for Ray and optionally vLLM.
 Ideally you should run the same version of Ray contained in the vLLM container
@@ -21,11 +25,21 @@ It is possible to launch workers and head processes in any order:
        Ray processes are started by both the workers and the head node to ensure the Ray
        cluster is up and running before running anything else;
     6. the head node runs vLLM if 'vllm serve' command line parameters are specified on 
-       the command line.
+       the command line;
+    7. the worker nodes stop by sending a SIGSTOP signal to themselves after launching the
+       Ray process.
 
 It is possible to specify both port and multicast group; the default multicast group is
 224.0.0.100 making it non-routable.
 All the command line parameters are documented, just run the script with  --help to see a list.
+
+When running inside SLURM and specifying the --slurm switch head and workers are automatically
+detected and run:
+
+```
+srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
+     --num-gpus 8  Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
+```
 
 The script has been so far used only with Singularity and Apptainer on HPE/Cray systems but
 nothing is specific to the environment so it should work on any Linux cluster.
@@ -39,7 +53,7 @@ Run on head node, two nodes, one worker, one head, 8 GPUs per node:
 ```
 Run on worker node:
 ```
-./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --worker --num-gpus 8
+./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --num-gpus 8
 ```
 """
 import os
