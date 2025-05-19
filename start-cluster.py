@@ -6,7 +6,7 @@
 #           * Add notifier process which either execute scripts or saves file with name
 #             <job id>--<head node name>--<head node ip address>--<vllm port>
 #           * Add option to specify script to run on the command line
-        
+#       remove global variables: have functions return current global variables        
 """
 This script allows launching containers for Ray and optionally vLLM.
 Ideally you should run the same version of Ray contained in the vLLM container
@@ -65,12 +65,54 @@ import struct
 import sys
 import ipaddress
 import signal
+from dataclasses import dataclass
 
 # Workers' IP address
 workers : set[bytes] = set()
 
 # IP address rad from Ray outputj
 ray_ip_address : str = ""
+
+@dataclass
+class VLLMConfig:
+    tensor_parallel: int = 0
+    pipeline_parallel: int = 0
+    num_gpus: int = 0
+
+def notify_loop(head, port, slurm) -> None:
+
+    connected = False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        while not connected:
+            try:
+                s.connect(head, port)
+                connected = True
+            except:
+                pass
+    if slurm:
+        signal(os.getpid(), signal.SIGSTOP)
+    else:
+        system.exit(0)
+
+
+# Return configuration from SLURM Job info
+def vllm_config_from_slurm_job() -> VLLMConfig:
+    #--tensor-parallel = num gpus per node
+    #--pipeline-parallel = num nodes
+    if "SLURM_JOB_GPUS" not in os.environ:
+        abort("SLURM_JOB_GPUS env var not set")
+    num_gpus : int = len(os.environ("SLURM_JOB_GPUS").split(','))
+    if "SLURM_JOB_NODE_NUM_NODES" not in os.environ:
+        abort("SLURM_JOB_NUM_NODES env var not set") 
+    num_nodes : int = int(os.environ["SLURM_JOB_NUM_NODES"])  
+    return VLLMConfig(num_gpus, num_nodes, num_gpus)
+
+def select_notifier_node(nodes, head_node):
+    nn : str = ""
+    while nn == head_node:
+        nn = random.choice(nodes)
+    return nn
+
 
 def abort(msg: str, exit_code: int =1) -> None:
     print(msg, sys.stderr)
@@ -223,7 +265,7 @@ def num_workers_from_slurm_nodelist(nodelist: list[str]) -> int:
 #-------------------------------------------------------------------------------
 #
 
-def main():
+def main() -> None:
 
 # 1. Configure environment
     #check if ray alreay active:
@@ -248,6 +290,8 @@ def main():
                                                                   "'--distributed-executor-backend ray' is added to the 'vllm serve' command line")
     parser.add_argument("container_runner", help="Container runner, Singularity, Apptainer, Podmason...")
     parser.add_argument("container_image", help="Path to container must contain Ray and if additinal ")
+    parser.add_argument("--container-args", help="string containing a space separated list of command line " \
+                                                 "argument to pass to the 'container runner'")
     parser.add_argument("--num-gpus", type=int, help="Number of GPUs")
     parser.add_argument("--head", const=True, nargs='?', help="Head node")
     parser.add_argument("--port", type=int, help="Ray TCP port, for head only, workers will receive port from head")
@@ -259,6 +303,9 @@ def main():
     parser.add_argument("--dashboard", const=True, nargs='?', 
                         help="Enable Ray dashboard by installing the proper version of Ray and additional packages through pip")
     parser.add_argument("--slurm", const=True, nargs='?', help="Automatically select head node and workers")
+    parser.add_argument("--auto", const=True, nargs='?', help="When --slurm enabled it generates a configuration for vllm " \
+                        "using the SLURM job information")
+    parser.add_argument("--notification-script", help="call the specified script passing <node name> <node ip> <port> on the command line")
                     
     ray_args, vllm_args = parser.parse_known_args() # known, unknown
     #'unknown' are the parameters after `vllm serve'`
@@ -270,6 +317,7 @@ def main():
     head : bool = False
     worker : bool  = False
     num_workers : int = 0
+    vllm_config : VLLMConfig = VLLMConfig() 
     if ray_args.slurm:
         print("Autodetecting head and workers...")
         ok, nodes = slurm_nodelist() 
@@ -278,6 +326,8 @@ def main():
         head = is_head_from_slurm_nodelist(nodes)
         worker = not head
         num_workers = num_workers_from_slurm_nodelist(nodes)
+        if ray_args.auto:
+            vllm_config = vllm_config_from_slurm_job()
         if head:
             print(f"Head is: {hostname}")
             print(f"{num_workers} workers")
@@ -290,7 +340,7 @@ def main():
                   "how many workers it needs to wait for")
         num_workers = ray_args.num_workers 
 
-    num_gpus : int = ray_args.num_gpus or 0
+    num_gpus : int = ray_args.num_gpus or (llvm_config.num_gpus if llvm_config.num_gpus > 0 else 1) 
     mcast_address : str = ray_args.mcast_address or "224.0.0.100" # non routable
     mcast_port : int = ray_args.mcast_port or 5001
     if not valid_ip_address(mcast_address):
@@ -298,6 +348,9 @@ def main():
         
     if not valid_port(mcast_port):
         abort("Invalid multicast port")
+    
+    if ray_args.auto and not ray_args.slurm:
+        print("Warning 'auto' is only available when 'slurm' selected, won't be generating vllm configuration")
 
 # 2.1 Optionally install dashboard
     if head and ray_args.dashboard:
@@ -376,33 +429,44 @@ def main():
         for w in workers:
             print(w.decode('utf-8'))
  
-# 8. Launch vllm if parameters specified
-        
-    # if no arguments for vllm or worker do not launch vllm and exit
+# 8. Start notification loop
+
+    # keep trying to connect to http://<head node>:<port> until
+    # connection is established
+    if worker and len(vllm_args) > 0:
+        notifier : str = select_notifier_node(nodelist, head_address)
+        if socket.gethostbyname() == notifier:
+            notify_loop(head_address, port, ray_args.slurm)
+
+# 9. Launch vllm if parameters specified
+
+    # if no arguments for vllm or worker do not launch vllm and pause execution
+    # when run from withing SLURM or exit
     if not vllm_args or worker:
-        print(f"Worker @{hostname} stopping")
-        os.kill(os.getpid(), signal.SIGSTOP)
+        if not ray_args.slurm:
+            sys.exit(0)
+        else:
+            os.kill(os.getpid(), signal.SIGSTOP)
+
+    
+
     sub.call([ray_args.container_runner, 'exec', ray_args.container_image, 'ray', 'status'])
     #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
     cwd : str = os.environ["PWD"]
-    vllm_cmdline : list[str] = [ray_args.container_runner, "exec",
-                                ray_args.container_image, "vllm",
-                                "serve", "--distributed-executor-backend", "ray"] + vllm_args
-    
-    # optionally mount paths
-    if ray_args.container_runner in ("singularity", "apptainer"):
-        if ray_args.app_dir:
-            vllm_cmdline += ['--bind', ray_args.app + ":" + "/app"]
-        if ray_args.hf_dir:
-            vllm_cmdline += ['--bind', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
-    elif ray_args.container_runner in ('podman', 'docker'):
-        if ray_args.app_dir:
-            vllm_cmdline += ['-v', ray_args.app + ":" + "/app"]
-        if ray_args.hf_dir:
-            vllm_cmdline += ['-v', ray_args.hf_dir + ":" + "/root/.cache/huggingface"]
+    vllm_cmdline : list[str] = []
+    vllm_auto_args = []
+    if vllm_config.num_gpus > 0:
+        vllm_auto_args = ["--tensor-parallel-size", vllm_config.tensor_parallel,
+                          "--pipeline-parallel-size", vllm_config.pipeline_parallel]
+    if ray_args.container_args:
+        cargs = ray_container_args.split()
+        vllm_cmdline = [ray_args.container_runner, "exec"] + cargs [ray_args.container_image, "vllm",
+                        "serve, "--distributed-executor-backend", "ray"] + vllm_args
     else:
-        print(f"Could not map /app and /huggingface path, unknown container type '{ray_args.container_runner}'")
+       vllm_cmdline = [ray_args.container_runner, "exec", ray_args.container_image, "vllm",
+                       "serve", "--distributed-executor-backend", "ray"] + vllm_args
+       
     
     if head:
         print(' '.join(vllm_cmdline))
