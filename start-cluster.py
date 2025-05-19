@@ -33,6 +33,9 @@ It is possible to specify both port and multicast group; the default multicast g
 224.0.0.100 making it non-routable.
 All the command line parameters are documented, just run the script with  --help to see a list.
 
+Additional parameters to the container runner can be passed through the --container-parameters
+argument.
+
 When running inside SLURM and specifying the --slurm switch head and workers are automatically
 detected and run:
 
@@ -40,6 +43,8 @@ detected and run:
 srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
      --num-gpus 8  Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
 ```
+It is possible to have the script automatically configure llvm using information from
+the SLURM environment but specifying the --auto parameter together with --slurm.
 
 The script has been so far used only with Singularity and Apptainer on HPE/Cray systems but
 nothing is specific to the environment so it should work on any Linux cluster.
