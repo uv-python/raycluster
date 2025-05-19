@@ -79,8 +79,7 @@ class VLLMConfig:
     pipeline_parallel: int = 0
     num_gpus: int = 0
 
-def notify_loop(head, port, slurm) -> None:
-
+def notify_loop(head, port, slurm, script="") -> None:
     connected = False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         while not connected:
@@ -89,6 +88,12 @@ def notify_loop(head, port, slurm) -> None:
                 connected = True
             except:
                 pass
+    if script:
+        try:
+            sub.call([script, "http://" + head + ":" + str(port)])
+        except Exception as e:
+            abort("Error invoking notification script\n" + str(e))
+    
     if slurm:
         signal(os.getpid(), signal.SIGSTOP)
     else:
@@ -434,9 +439,9 @@ def main() -> None:
     # keep trying to connect to http://<head node>:<port> until
     # connection is established
     if worker and len(vllm_args) > 0:
-        notifier : str = select_notifier_node(nodelist, head_address)
+        notifier : str = select_notifier_node(slurm_nodelist(), head_address)
         if socket.gethostbyname() == notifier:
-            notify_loop(head_address, port, ray_args.slurm)
+            notify_loop(head_address, port, ray_args.slurm, ray_args.notification_script)
 
 # 9. Launch vllm if parameters specified
 
