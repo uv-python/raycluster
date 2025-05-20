@@ -118,11 +118,10 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
     return VLLMConfig(num_gpus, num_nodes, num_gpus)
 
 def select_notifier_node(nodes, head_node):
-    nn : str = ""
+    nn : str = head_node
     while nn == head_node:
         nn = random.choice(nodes)
     return nn
-
 
 def abort(msg: str, exit_code: int =1) -> None:
     print(msg, sys.stderr)
@@ -189,6 +188,7 @@ def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
         # for a try/except block
         while not done:
             sock.sendto(msg.encode(), (mcast_group, port))
+            #select() is more elegant but it's more code
             try:
                 if (x := sock2.recvfrom(128)):
                     rayport = x[0] 
@@ -227,8 +227,7 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> 
     finally:
         sock.close()
 
-def remove_ansi_escape_chars(buffer) -> str:
-
+def remove_ansi_escape_chars(buffer: str) -> str:
     ansi_escape = re.compile(r'\x1b[^m]+m')
     t : str = "" 
     try:
@@ -244,13 +243,15 @@ def extract_ip_address(buffer: bytes) -> str:
     """
     #Doesn't work when more than one IP address in the same subnet
     #return socket.gethostbyname(socket.getfqdn());
-    ansi_escape = re.compile(r'\x1b[^m]+m')
     t : list[str] = []
+    t = remove_ansi_escape_chars(buffer.decode('utf-8')).split()
+    if not t:
+        return ""
     try:
-        t = ansi_escape.sub('', buffer.decode('utf-8')).split()
+        ip = t[t.index('IP:') + 1]
+        return ip
     except:
         return ""
-    return t[t.index('IP:') + 1]
 
 
 def slurm_nodelist() -> tuple[bool, list[str]]: # return <OK | NOT OK, value>
