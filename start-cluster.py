@@ -71,6 +71,7 @@ import sys
 import ipaddress
 import signal
 from dataclasses import dataclass
+import random
 
 # Workers' IP address
 workers : set[bytes] = set()
@@ -89,7 +90,7 @@ def notify_loop(head, port, slurm, script="") -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         while not connected:
             try:
-                s.connect(head, port)
+                s.connect((head, port))
                 connected = True
             except:
                 pass
@@ -100,9 +101,9 @@ def notify_loop(head, port, slurm, script="") -> None:
             abort("Error invoking notification script\n" + str(e))
     
     if slurm:
-        signal(os.getpid(), signal.SIGSTOP)
+        signal.signal(os.getpid(), signal.SIGSTOP)
     else:
-        system.exit(0)
+        sys.exit(0)
 
 
 # Return configuration from SLURM Job info
@@ -111,7 +112,7 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
     #--pipeline-parallel = num nodes
     if "SLURM_JOB_GPUS" not in os.environ:
         abort("SLURM_JOB_GPUS env var not set")
-    num_gpus : int = len(os.environ("SLURM_JOB_GPUS").split(','))
+    num_gpus : int = len(os.environ["SLURM_JOB_GPUS"].split(','))
     if "SLURM_JOB_NODE_NUM_NODES" not in os.environ:
         abort("SLURM_JOB_NUM_NODES env var not set") 
     num_nodes : int = int(os.environ["SLURM_JOB_NUM_NODES"])  
@@ -231,7 +232,7 @@ def remove_ansi_escape_chars(buffer: str) -> str:
     ansi_escape = re.compile(r'\x1b[^m]+m')
     t : str = "" 
     try:
-        t = ansi_escape.sub('', buffer.decode('utf-8'))
+        t = ansi_escape.sub('', buffer)
         return t
     except:
         return ""
@@ -257,9 +258,11 @@ def extract_ip_address(buffer: bytes) -> str:
 def slurm_nodelist() -> tuple[bool, list[str]]: # return <OK | NOT OK, value>
     OK : bool = True
     if not "SLURM_JOB_NODELIST" in os.environ:
-        return (not OK, False)
+        return (not OK, [])
     r = re.compile(r"nid\[([^\]]+)\]")
     result = r.search(os.environ["SLURM_JOB_NODELIST"])
+    if not result:
+        return (not OK, [])
     try:
         n = result.group(1)
         return (OK, sorted(n.split(',')))
@@ -344,14 +347,14 @@ def main() -> None:
             print(f"{num_workers} workers")
 
     else:
-        head : bool = ray_args.head or False
-        worker : bool = not head 
+        head = ray_args.head or False
+        worker = not head 
         if head and not ray_args.num_workers:
             abort("When --head specified --num-workers is required because the head node needs to know " \
                   "how many workers it needs to wait for")
         num_workers = ray_args.num_workers 
 
-    num_gpus : int = ray_args.num_gpus or (llvm_config.num_gpus if llvm_config.num_gpus > 0 else 1) 
+    num_gpus : int = ray_args.num_gpus or (vllm_config.num_gpus if vllm_config.num_gpus > 0 else 1) 
     mcast_address : str = ray_args.mcast_address or "224.0.0.100" # non routable
     mcast_port : int = ray_args.mcast_port or 5001
     if not valid_ip_address(mcast_address):
@@ -400,7 +403,7 @@ def main() -> None:
     out : bytes = bytes()
     try:
         out = sub.check_output(cmd_line)
-        print(remove_ansi_escape_chars(out))
+        print(remove_ansi_escape_chars(out.decode('utf-8')))
         
     except Exception as e:
         abort(str(e))
@@ -446,7 +449,7 @@ def main() -> None:
     # connection is established
     if worker and len(vllm_args) > 0:
         notifier : str = select_notifier_node(slurm_nodelist(), head_address)
-        if socket.gethostbyname() == notifier:
+        if socket.gethostname() == notifier:
             notify_loop(head_address, port, ray_args.slurm, ray_args.notification_script)
 
 # 9. Launch vllm if parameters specified
@@ -464,19 +467,18 @@ def main() -> None:
     sub.call([ray_args.container_runner, 'exec', ray_args.container_image, 'ray', 'status'])
     #Launch vllm on the head node 
     os.environ["VLLM_HOST_IP"] = local_ip
-    cwd : str = os.environ["PWD"]
     vllm_cmdline : list[str] = []
     vllm_auto_args = []
     if vllm_config.num_gpus > 0:
         vllm_auto_args = ["--tensor-parallel-size", vllm_config.tensor_parallel,
                           "--pipeline-parallel-size", vllm_config.pipeline_parallel]
     if ray_args.container_args:
-        cargs = ray_container_args.split()
-        vllm_cmdline = [ray_args.container_runner, "exec"] + cargs [ray_args.container_image, "vllm",
-                        "serve, "--distributed-executor-backend", "ray"] + vllm_args
+        cargs = ray_args.container_args.split()
+        vllm_cmdline = [ray_args.container_runner, "exec"] + cargs + [ray_args.container_image, "vllm",
+                        "serve", "--distributed-executor-backend", "ray"] + vllm_auto_args + vllm_args
     else:
        vllm_cmdline = [ray_args.container_runner, "exec", ray_args.container_image, "vllm",
-                       "serve", "--distributed-executor-backend", "ray"] + vllm_args
+                       "serve", "--distributed-executor-backend", "ray"] + vllm_auto_args + vllm_args
        
     
     if head:
