@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
-# TODO: consider adding timeouts for sync operations, 
-#       when running in SLURM:
-#           * Add notifier process which either execute scripts or saves file with name
-#             <job id>--<head node name>--<head node ip address>--<vllm port>
-#           * Add option to specify script to run on the command line
-#       remove global variables: have functions return current global variables        
 """
 This script allows launching containers for Ray and optionally vLLM.
 Ideally you should run the same version of Ray contained in the vLLM container
@@ -72,9 +66,7 @@ import ipaddress
 import signal
 from dataclasses import dataclass
 import random
-
-# Workers' IP address
-workers : set[bytes] = set()
+import selectors
 
 # IP address rad from Ray outputj
 ray_ip_address : str = ""
@@ -118,7 +110,7 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
     num_nodes : int = int(os.environ["SLURM_JOB_NUM_NODES"])  
     return VLLMConfig(num_gpus, num_nodes, num_gpus)
 
-def select_notifier_node(nodes, head_node):
+def select_notifier_node(nodes, head_node) -> str:
     nn : str = head_node
     while nn == head_node:
         nn = random.choice(nodes)
@@ -145,15 +137,14 @@ def notify_client(client: str, port: int, ray_port: int) -> None:
     except:
         abort("Error creating socket")
 
-
-def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: int) -> None:
+def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: int) -> set[bytes]:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((mcast_group, port))
         mreq = struct.pack("4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        w = set()
+        w : set[bytes] = set()
         # at each iteration a message from a worker is received; because the same
         # worker might be sending more than one message a 'set' is used to record
         # which workers have already notified the head node to ensure one unique
@@ -162,47 +153,46 @@ def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: i
             client = sock.recv(64)
             notify_client(client.decode('utf-8'), port+1, ray_port);
             w.add(client)
-        global workers
-        workers = w
+        return w
     except:
         abort("Error synchronising with workers")
+        return set() # LSP tool does not understand that abort terminates the program
     finally:
         sock.close()
 
-def sync_with_head(mcast_group: str, port: int, ttl: int = 3 ) -> int:
+def sync_with_head(mcast_group: str, port: int, ray_ip_address,ttl: int = 3 ) -> int:
+    TIMEOUT=2.0 #seconds make it a configurable parameter?
     try:
+        sel = selectors.DefaultSelector()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
         # Sync happens twice once before launching Ray, when ray_ip_address in empty
         # and once after Ray is started when ray_ip_address contains the IP extracted from
         # Ray's output.
         msg= socket.gethostbyname(socket.getfqdn()) if not ray_ip_address else ray_ip_address
-
         sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock2.bind(("0.0.0.0", port+1))
-        sock2.setblocking(False);
-        done = False
+        sel.register(sock2, selectors.EVENT_READ, data=None)
         rayport : bytes = bytes()
         # at each iteration a new broadcast message is sent and an attempt
         # at receiving a response from the head node is performed.
         # if the recvfrom call fails an exception is thrown, hence the need
         # for a try/except block
-        while not done:
+        while True:
             sock.sendto(msg.encode(), (mcast_group, port))
-            #select() is more elegant but it's more code
-            try:
-                if (x := sock2.recvfrom(128)):
-                    rayport = x[0] 
-                    done = True
-            except:
-                pass
-        return int(rayport.decode('utf-8'))
+            events = sel.select(timeout=TIMEOUT)
+            if not events:
+                continue
+            rayport, _ = sock2.recvfrom(128)
+            return int(rayport.decode('utf-8'))
+
     except Exception as e:
         abort("Error synchronising with head node\n" + str(e))
         return 0 # lsp tool does not understand that abort terminates the program
     finally:
         sock.close()
-        sock.close()
+        sel.unregister(sock2)
+        sock2.close()
 
 def mcast_address_receive(mcast_group: str, port: int) -> str:
     try:
@@ -375,10 +365,11 @@ def main() -> None:
     # sync head with workers, head and workers can start in any order
     # workers keep sending a broadcast message and wait for a response from the head node
     # the head node replies to each worker with the ray port to use
+    workers : set[bytes] = set()
     if head:
-        sync_with_workers(mcast_address, mcast_port, num_workers, port)
+        workers = sync_with_workers(mcast_address, mcast_port, num_workers, port)
     else:
-        port = sync_with_head(mcast_address, mcast_port)
+        port = sync_with_head(mcast_address, mcast_port, "")
     
     head_address : str = ""
     if worker:
@@ -412,8 +403,6 @@ def main() -> None:
 
     local_ip : str = extract_ip_address(out)
     print(f"IP Address: {local_ip}")
-    global ray_ip_address
-    ray_ip_address = local_ip
 
 # 5. Broadcast IP address of head process
     
@@ -428,11 +417,10 @@ def main() -> None:
     # have started.
     # This time the worker and head processeswill send a messagesto after Ray has been started.
     # Instead of write additional code we can reuse what implemented above.
-
     if head:
-        sync_with_workers(mcast_address, mcast_port, num_workers, port)
+        workers = sync_with_workers(mcast_address, mcast_port, num_workers, port)
     else:
-        _ = sync_with_head(mcast_address, mcast_port)
+        _ = sync_with_head(mcast_address, mcast_port, local_ip)
 
 # 7. Print IP addresses
     if worker:
