@@ -265,7 +265,7 @@ def extract_ip_address(buffer: bytes) -> str:
 
 def slurm_nodelist() -> tuple[bool, list[str]]:  # return <OK | NOT OK, value>
     OK: bool = True
-    if not "SLURM_JOB_NODELIST" in os.environ:
+    if "SLURM_JOB_NODELIST" not in os.environ:
         return (not OK, [])
     r = re.compile(r"nid\[([^\]]+)\]")
     result = r.search(os.environ["SLURM_JOB_NODELIST"])
