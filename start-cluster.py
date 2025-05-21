@@ -68,9 +68,6 @@ from dataclasses import dataclass
 import random
 import selectors
 
-# IP address rad from Ray outputj
-ray_ip_address : str = ""
-
 @dataclass
 class VLLMConfig:
     tensor_parallel: int = 0
@@ -105,8 +102,9 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
     if "SLURM_JOB_GPUS" not in os.environ:
         abort("SLURM_JOB_GPUS env var not set")
     num_gpus : int = len(os.environ["SLURM_JOB_GPUS"].split(','))
-    if "SLURM_JOB_NODE_NUM_NODES" not in os.environ:
+    if "SLURM_JOB_NUM_NODES" not in os.environ:
         abort("SLURM_JOB_NUM_NODES env var not set") 
+
     num_nodes : int = int(os.environ["SLURM_JOB_NUM_NODES"])  
     return VLLMConfig(num_gpus, num_nodes, num_gpus)
 
@@ -149,10 +147,12 @@ def sync_with_workers(mcast_group: str, port: int, num_workers: int, ray_port: i
         # worker might be sending more than one message a 'set' is used to record
         # which workers have already notified the head node to ensure one unique
         # entry is stored
+        print("Re-syncng with workers...")
         while len(w) != num_workers:
             client = sock.recv(64)
             notify_client(client.decode('utf-8'), port+1, ray_port);
             w.add(client)
+            print(f"Added worker {client}")
         return w
     except:
         abort("Error synchronising with workers")
@@ -178,7 +178,11 @@ def sync_with_head(mcast_group: str, port: int, ray_ip_address,ttl: int = 3 ) ->
         # at receiving a response from the head node is performed.
         # if the recvfrom call fails an exception is thrown, hence the need
         # for a try/except block
+        print("syncing with head")
+        attempt : int = 1
         while True:
+            print(f"attempt {attempt}")
+            attempt += 1
             sock.sendto(msg.encode(), (mcast_group, port))
             events = sel.select(timeout=TIMEOUT)
             if not events:
@@ -270,20 +274,14 @@ def num_workers_from_slurm_nodelist(nodelist: list[str]) -> int:
 #
 
 def main() -> None:
-
 # 1. Configure environment
     #check if ray alreay active:
     if "ROCR_VISIBLE_DEVICES" in os.environ:
         os.environ.pop("ROCR_VISIBLE_DEVICES")
-    try:
-        _ = sub.check_output(['ray', 'status'], stderr=sub.STDOUT)
-        print("Ray already running, exiting...")
-        sys.exit(1)
-    except:
-        pass
     
     hostname = socket.gethostname()
 
+    print("Argparse")
 # 2. Parse arguments
     parser = argparse.ArgumentParser(prog="start-cluster", description="Run Ray and vllM containers; workers and head processes" \
                                                                   "can be started independently in any order and the port needs only be " \
@@ -313,6 +311,14 @@ def main() -> None:
                     
     ray_args, vllm_args = parser.parse_known_args() # known, unknown
     #'unknown' are the parameters after `vllm serve'`
+    print(f"SLURM: {ray_args.slurm}")
+    if not ray_args.slurm:
+        try:
+            _ = sub.check_output([ray_args.container_runner, ray_args.container, 'ray', 'status'], stderr=sub.STDOUT)
+            print("Ray already running, exiting...")
+            sys.exit(1)
+        except:
+            pass
     
     port : int = ray_args.port or 6379
     if not valid_port(port):
@@ -335,6 +341,8 @@ def main() -> None:
         if head:
             print(f"Head is: {hostname}")
             print(f"{num_workers} workers")
+        else:
+            print(f"Worker: {hostname}")
 
     else:
         head = ray_args.head or False
@@ -356,7 +364,7 @@ def main() -> None:
     if ray_args.auto and not ray_args.slurm:
         print("Warning 'auto' is only available when 'slurm' selected, won't be generating vllm configuration")
 
-# 2.1 Optionally install dashboard
+    # 2.1 Optionally install dashboard
     if head and ray_args.dashboard:
         sub.call([ray_args.container_runner, 'exec', ray_args.container_image, 'pip', 'install', 'ray[default]', 'py-spy', 'memray'])
 # 
@@ -395,7 +403,6 @@ def main() -> None:
     try:
         out = sub.check_output(cmd_line)
         print(remove_ansi_escape_chars(out.decode('utf-8')))
-        
     except Exception as e:
         abort(str(e))
 
@@ -405,7 +412,6 @@ def main() -> None:
     print(f"IP Address: {local_ip}")
 
 # 5. Broadcast IP address of head process
-    
     if head:
         broadcast_ip_address(local_ip, mcast_address, mcast_port)
 
@@ -463,10 +469,10 @@ def main() -> None:
     if ray_args.container_args:
         cargs = ray_args.container_args.split()
         vllm_cmdline = [ray_args.container_runner, "exec"] + cargs + [ray_args.container_image, "vllm",
-                        "serve", "--distributed-executor-backend", "ray"] + vllm_auto_args + vllm_args
+                        "serve"] + vllm_args + ["--distributed-executor-backend", "ray"] + vllm_auto_args
     else:
        vllm_cmdline = [ray_args.container_runner, "exec", ray_args.container_image, "vllm",
-                       "serve", "--distributed-executor-backend", "ray"] + vllm_auto_args + vllm_args
+                       "serve", ] + vllm_args + vllm_auto_args + ["--distributed-executor-backend", "ray"]
        
     
     if head:
