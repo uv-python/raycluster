@@ -37,8 +37,10 @@ detected and run:
 srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
      --num-gpus 8  Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
 ```
-It is possible to have the script automatically configure llvm using information from
-the SLURM environment but specifying the --auto parameter together with --slurm.
+It is possible to have the script automatically configure vLLM using information from
+the SLURM environment by specifying the --auto parameter together with --slurm; note
+however that the configuration depends on the structure of the model e.g. the number
+of parallel tensor layers must be divisible by the number of attention heads in the model.
 
 The script has been so far used only with Singularity and Apptainer on HPE/Cray systems but
 nothing is specific to the environment so it should work on any Linux cluster.
@@ -77,7 +79,15 @@ class VLLMConfig:
     num_gpus: int = 0
 
 
+def get_host_name(addr: str) -> str:
+    h: str = socket.gethostbyaddr(addr)[0]
+    return h.split(".")[0]
+
+
 def notify_loop(head, port, slurm, script="") -> None:
+    print(
+        f"{port} NOTIFY loop 0000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    )
     connected = False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         while not connected:
@@ -120,9 +130,10 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
 
 
 def select_notifier_node(nodes, head_node) -> str:
+    print(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> {head_node}")
     nn: str = head_node
     while nn == head_node:
-        nn = random.choice(nodes)
+        nn = "nid" + random.choice(nodes)
     return nn
 
 
@@ -499,7 +510,6 @@ def main() -> None:
         app_args.container_image,
         "ray",
     ]
-    print(f"NUM_GPUS={num_gpus}")
     cmd_line: list[str] = []
     if head:
         cmd_line = execute_ray + [
@@ -571,10 +581,16 @@ def main() -> None:
     # keep trying to connect to http://<head node>:<port> until
     # connection is established
     if worker and app_args.model:
-        notifier: str = select_notifier_node(slurm_nodelist(), head_address)
+        ok, nodes = slurm_nodelist()
+        if not ok:
+            abort("Failed to retrieve job node list")
+        notifier = select_notifier_node(nodes, get_host_name(head_address))
+        if not notifier:
+            abort("Failed to select notifier process")
+        print(f"&&&&&&&&&&&&&&&&&&&&&&&&&&&&&& NOTIFIER: {notifier}")
         if socket.gethostname() == notifier:
             notify_loop(
-                head_address, port, app_args.slurm, app_args.notification_script
+                head_address, 8000, app_args.slurm, app_args.notification_script
             )
 
     # 9. Launch vllm if model specified
