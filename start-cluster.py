@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
+
+# TODO: add --vllm-port parameter (notification), consider reading 'num_attention_heads'
+#       from config.json to automatically set the tensor layers adn number of gpus
+#       num_attention_heads % (num tensor layers) = 0
+
+
 """
 This script allows launching containers for Ray and optionally vLLM.
 Ideally you should run the same version of Ray contained in the vLLM container
