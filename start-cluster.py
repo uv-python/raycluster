@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
 
-# TODO: add --vllm-port parameter (notification), consider reading 'num_attention_heads'
-#       from config.json to automatically set the tensor layers adn number of gpus
-#       num_attention_heads % (num tensor layers) = 0
-
+# TODO: consider reading 'num_attention_heads' from config.json to automatically set
 
 """
 This script allows launching containers for Ray and optionally vLLM.
@@ -91,9 +88,6 @@ def get_host_name(addr: str) -> str:
 
 
 def notify_loop(head, port, slurm, script="") -> None:
-    print(
-        f"{port} NOTIFY loop 0000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    )
     connected = False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         while not connected:
@@ -110,13 +104,13 @@ def notify_loop(head, port, slurm, script="") -> None:
     else:
         try:
             jid = os.environ["SLURM_JOB_ID"]
-            with open(f"{jid}-vllm-url", "x") as f:
-                f.write(f"http://{socket.gethostname():{port}}")
+            with open(f"{jid}-vllm-url", "w") as f:
+                f.write(f"http://{head}:{port}")
         except Exception as e:
             abort(f"Cannot write to file - {str(e)}")
 
     if slurm:
-        signal.signal(os.getpid(), signal.SIGSTOP)
+        os.kill(os.getpid(), signal.SIGSTOP)
     else:
         sys.exit(0)
 
@@ -395,8 +389,15 @@ def main() -> None:
         "--notification-script",
         help="call the specified script passing <node name> <node ip> <port> on the command line",
     )
+    parser.add_argument(
+        "--vllm-port", type=int, help="vLLM port"
+    )  # need to know to run notification loop
 
     app_args, vllm_args = parser.parse_known_args()  # known, unknown
+    print(type(vllm_args))
+
+    if hasattr(app_args, "vllm_port") and "--port" in vllm_args:
+        abort("Only set --vllm-port, do not use --port to select vllm port")
 
     if not app_args.model:
         print(
@@ -491,7 +492,7 @@ def main() -> None:
                 "memray",
             ]
         )
-    #
+
     # 3. Sync workers with head
 
     # sync head with workers, head and workers can start in any order
@@ -593,10 +594,12 @@ def main() -> None:
         notifier = select_notifier_node(nodes, get_host_name(head_address))
         if not notifier:
             abort("Failed to select notifier process")
-        print(f"&&&&&&&&&&&&&&&&&&&&&&&&&&&&&& NOTIFIER: {notifier}")
         if socket.gethostname() == notifier:
             notify_loop(
-                head_address, 8000, app_args.slurm, app_args.notification_script
+                get_host_name(head_address),
+                app_args.vllm_port if app_args.vllm_port > 0 else 8000,
+                app_args.slurm,
+                app_args.notification_script,
             )
 
     # 9. Launch vllm if model specified
@@ -615,6 +618,8 @@ def main() -> None:
     os.environ["VLLM_HOST_IP"] = local_ip
     vllm_cmdline: list[str] = []
     vllm_auto_args = []
+    vllm_args += ["--port", str(app_args.vllm_port if app_args.vllm_port else 8000)]
+    vllm_args += ["--distributed-executor-backend", "ray"]
     if vllm_config.num_gpus > 0:
         vllm_auto_args = [
             "--tensor-parallel-size",
@@ -631,7 +636,6 @@ def main() -> None:
             + [app_args.container_image, "vllm", "serve", app_args.model]
             + vllm_args
             + vllm_auto_args
-            + ["--distributed-executor-backend", "ray"]
         )
     else:
         vllm_cmdline = (
@@ -645,7 +649,6 @@ def main() -> None:
             ]
             + vllm_args
             + vllm_auto_args
-            + ["--distributed-executor-backend", "ray"]
         )
 
     print(" ".join(vllm_cmdline))
