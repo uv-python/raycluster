@@ -3,6 +3,7 @@
 # Author: Ugo Varetto
 
 # TODO: consider reading 'num_attention_heads' from config.json to automatically set
+#       tensor parallelism and number of gpus
 
 """
 This script allows launching containers for Ray and optionally vLLM.
@@ -88,14 +89,11 @@ def get_host_name(addr: str) -> str:
 
 
 def notify_loop(head, port, slurm, script="") -> None:
-    connected = False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        while not connected:
-            try:
-                s.connect((head, port))
-                connected = True
-            except:
-                pass
+        while s.connect_ex(
+            (head, port)
+        ):  # returns a value other than zero when it fails
+            pass
     if script:
         try:
             sub.call([script, "http://" + head + ":" + str(port)])
@@ -394,10 +392,9 @@ def main() -> None:
     )  # need to know to run notification loop
 
     app_args, vllm_args = parser.parse_known_args()  # known, unknown
-    print(type(vllm_args))
 
     if hasattr(app_args, "vllm_port") and "--port" in vllm_args:
-        abort("Only set --vllm-port, do not use --port to select vllm port")
+        abort("Only set port with --vllm-port, do not use vllm --port parameter")
 
     if not app_args.model:
         print(
@@ -445,9 +442,6 @@ def main() -> None:
             print(f"{num_workers} workers")
         else:
             print(f"Worker: {hostname}")
-        print("**" * 10)
-        print(vllm_config)
-        print("**" * 10)
 
     else:
         head = app_args.head or False
@@ -462,9 +456,6 @@ def main() -> None:
     num_gpus: int = app_args.num_gpus or (
         vllm_config.num_gpus if vllm_config.num_gpus > 0 else 1
     )
-    print("%%%%" * 10)
-    print(num_gpus)
-    print("%%%%" * 10)
     mcast_address: str = app_args.mcast_address or "224.0.0.100"  # non routable
     mcast_port: int = app_args.mcast_port or 5001
     if not valid_ip_address(mcast_address):
@@ -594,10 +585,11 @@ def main() -> None:
         notifier = select_notifier_node(nodes, get_host_name(head_address))
         if not notifier:
             abort("Failed to select notifier process")
+        vllm_port = app_args.vllm_port if app_args.vllm_port else 8000
         if socket.gethostname() == notifier:
             notify_loop(
                 get_host_name(head_address),
-                app_args.vllm_port if app_args.vllm_port > 0 else 8000,
+                vllm_port,
                 app_args.slurm,
                 app_args.notification_script,
             )
@@ -664,5 +656,3 @@ def main() -> None:
 # -------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
-# vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray
