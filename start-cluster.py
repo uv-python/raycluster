@@ -128,7 +128,6 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
 
 
 def select_notifier_node(nodes, head_node) -> str:
-    print(f">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> {head_node}")
     nn: str = head_node
     while nn == head_node:
         nn = "nid" + random.choice(nodes)
@@ -154,7 +153,9 @@ def valid_port(p: int) -> bool:
 
 def notify_client(client: str, port: int, ray_port: int) -> None:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock: socket.socket = socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
+        )
         sock.sendto(bytes(str(ray_port), "utf-8"), (client, port))
     except:
         abort("Error creating socket")
@@ -164,10 +165,14 @@ def sync_with_workers(
     mcast_group: str, port: int, num_workers: int, ray_port: int
 ) -> set[bytes]:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock: socket.socket = socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
+        )
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((mcast_group, port))
-        mreq = struct.pack("4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY)
+        mreq: bytes = struct.pack(
+            "4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY
+        )
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         w: set[bytes] = set()
         # at each iteration a message from a worker is received; because the same
@@ -189,18 +194,20 @@ def sync_with_workers(
 def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 3) -> int:
     TIMEOUT = 2.0  # seconds make it a configurable parameter?
     try:
-        sel = selectors.DefaultSelector()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sel: selectors.DefaultSelector = selectors.DefaultSelector()
+        sock: socket.socket = socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
+        )
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
         # Sync happens twice once before launching Ray, when ray_ip_address in empty
         # and once after Ray is started when ray_ip_address contains the IP extracted from
         # Ray's output.
-        msg = (
+        msg: str = (
             socket.gethostbyname(socket.getfqdn())
             if not ray_ip_address
             else ray_ip_address
         )
-        sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock2: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock2.bind(("0.0.0.0", port + 1))
         sel.register(sock2, selectors.EVENT_READ, data=None)
         rayport: bytes = bytes()
@@ -227,10 +234,14 @@ def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 3) ->
 
 def mcast_address_receive(mcast_group: str, port: int) -> str:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock: socket.socket = socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
+        )
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((mcast_group, port))
-        mreq = struct.pack("4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY)
+        mreq: bytes = struct.pack(
+            "4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY
+        )
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         return sock.recv(128).decode("utf-8")
     except:
@@ -242,7 +253,9 @@ def mcast_address_receive(mcast_group: str, port: int) -> str:
 
 def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> None:
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock: socket.socket = socket.socket(
+            socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
+        )
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
         sock.sendto(ip.encode(), (mcast_group, port))
     except:
@@ -252,7 +265,7 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> 
 
 
 def remove_ansi_escape_chars(buffer: str) -> str:
-    ansi_escape = re.compile(r"\x1b[^m]+m")
+    ansi_escape: re.Pattern = re.compile(r"\x1b[^m]+m")
     t: str = ""
     try:
         t = ansi_escape.sub("", buffer)
@@ -495,9 +508,17 @@ def main() -> None:
     else:
         port = sync_with_head(mcast_address, mcast_port, "")
 
+    # SYNC PONT 1: ALL PROCESSES STARTED
     head_address: str = ""
+
+    # wait to receive address from head process
     if worker:
         head_address = mcast_address_receive(mcast_address, mcast_port)
+
+    # execution continues only on head node until the IP address has been extracted
+    # from Ray's output and sent to workers which receive it in the line above,
+    # note that because there are normally multiple IP addresses on the node, it it not
+    # safe to retreive the IP address through other means
 
     # 4. Run Ray
 
@@ -509,7 +530,7 @@ def main() -> None:
         "ray",
     ]
     cmd_line: list[str] = []
-    if head:
+    if head:  # head node reaches this point before workers
         cmd_line = execute_ray + [
             "start",
             "--head",
@@ -522,7 +543,7 @@ def main() -> None:
             cmd_line += ["--dashboard-host", "0.0.0.0"]
         else:
             cmd_line += ["--include-dashboard=False"]
-    else:
+    else:  # workers reach this point after head
         cmd_line = execute_ray + [
             "start",
             "--num-gpus",
@@ -545,6 +566,7 @@ def main() -> None:
     print(f"IP Address: {local_ip}")
 
     # 5. Broadcast IP address of head process
+    # send head address to workers waiting at SYNC POINT 1
     if head:
         broadcast_ip_address(local_ip, mcast_address, mcast_port)
 
@@ -560,6 +582,8 @@ def main() -> None:
         workers = sync_with_workers(mcast_address, mcast_port, num_workers, port)
     else:
         _ = sync_with_head(mcast_address, mcast_port, local_ip)
+
+    # RAY STARTED ON ALL NODES: SYNC POINT 2
 
     # 7. Print IP addresses
     if worker:
@@ -604,7 +628,7 @@ def main() -> None:
         else:
             os.kill(os.getpid(), signal.SIGSTOP)
 
-    # 9.2 Launch vllm
+    # 9.1 Launch vllm
 
     # Launch vllm on the head node
     os.environ["VLLM_HOST_IP"] = local_ip
