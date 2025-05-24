@@ -83,6 +83,13 @@ class VLLMConfig:
     num_gpus: int = 0
 
 
+# kill process active in stopped state, useful
+# to avoid SLURM to end job when current process is
+# done spawning backgound processes
+def pause():
+    os.kill(os.getpid(), signal.SIGSTOP)
+
+
 def get_host_name(addr: str) -> str:
     h: str = socket.gethostbyaddr(addr)[0]
     return h.split(".")[0]
@@ -108,7 +115,7 @@ def notify_loop(head, port, slurm, script="") -> None:
             abort(f"Cannot write to file - {str(e)}")
 
     if slurm:
-        os.kill(os.getpid(), signal.SIGSTOP)
+        pause()
     else:
         sys.exit(0)
 
@@ -626,8 +633,7 @@ def main() -> None:
         if not app_args.slurm:
             sys.exit(0)
         else:
-            os.kill(os.getpid(), signal.SIGSTOP)
-
+            pause()
     # 9.1 Launch vllm
 
     # Launch vllm on the head node
