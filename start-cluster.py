@@ -226,8 +226,8 @@ def sync_with_workers(
         sock.close()
 
 
-def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 3) -> int:
-    TIMEOUT = 2.0  # seconds make it a configurable parameter?
+def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 4) -> int:
+    TIMEOUT = 0.5  # seconds make it a configurable parameter?
     try:
         sel: selectors.DefaultSelector = selectors.DefaultSelector()
         sock: socket.socket = socket.socket(
@@ -438,6 +438,9 @@ def main() -> None:
     parser.add_argument(
         "--vllm-port", type=int, help="vLLM port"
     )  # need to know to run notification loop
+    parser.add_argument(
+        "--ttl", type=int, help="TTL (number of hops) for multicast packets"
+    )
 
     app_args, vllm_args = parser.parse_known_args()  # known, unknown
 
