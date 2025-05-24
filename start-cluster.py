@@ -5,27 +5,47 @@
 # TODO: consider reading 'num_attention_heads' from config.json to automatically set
 #       tensor parallelism and number of gpus
 
-"""
-This script allows launching containers for Ray and optionally vLLM.
-Ideally you should run the same version of Ray contained in the vLLM container
-to avoid problems.
-For AMD GPUs: make sure the amdgpu python package is NOT visible when running this script.
-It is possible to launch workers and head processes in any order:
-    1. the worker processes start then keep broadcas messages with their own IP address
-       until they receive a response form the head node containing the TCP port to connect to;
-    2. the worker process receives a messag from the head process and then waits until it receives
-       the IP address of the node to connect to;
-    3. the head process starts and waits until it has finished receiving messages from all
-       the workers to which it replies with the port to connect to;
-    4. the head process starts the Ray process and then sends a multicast message containing
-       the IP address to connect to;
-    5. after all the process are started another synchronisation step is performend after the
-       Ray processes are started by both the workers and the head node to ensure the Ray
-       cluster is up and running before running anything else;
-    6. the head node runs vLLM if 'vllm serve' command line parameters are specified on 
-       the command line;
-    7. the worker nodes stop by sending a SIGSTOP signal to themselves after launching the
-       Ray process.
+""" This script launches Ray and optionally vLLM.
+
+Because vLLM requires a running Ray instance to perform distributes inference,
+Ray must be started on each node before vLLM is started on the head node.
+And the Ray head node process must be started before the worker processes.
+The script first ensure that all the scripts have started on each node and
+the waits for all the Ray processes to be started before executing vLLM
+on the head node.
+Workers use a multicast group to communicate their IP address, wait for
+and ACK from the head node which returns the port to use.
+The head node starts Ray then sends the IP address to use to the workers
+which then start Ray passing the IP addressa and port received from the head
+process on the command line.
+
+Different parts of the scripts are executed only by the head or worker processes,
+according to the following sequence table.
+
+                                   Head process                                |           Worker process
+-------------------------------------------------------------------------------------------------------------------------
+|                                                                              |
+|1. parse paramerters                                                          |   parse parameters
+|2. wait on the multicast group to receive the address of each worker process  |    
+|3.                                                                            |   broadcast ip address
+|3. receive IP address of each worker                                          |                                           
+|4. send ACK to workers                                                        |
+|                                                                              |   receive ACK from head node
+|                                              All processes started           |                        
+|-------------------------------------------------------------------------------------------------------------------------
+|5. launch Ray process                                                         |   wait to receive IP address of head node
+|6. broadcast address of head node                                             |
+|7. wait to receive IP address from workers                                    |   receive ID address of head node
+|8.                                                                            |   launch Ray worker process
+|9.                                                                            |   broadcast ip address
+|10. receive IP address of each worker                                         |   pause execution (SIGSTOP)
+|                                                                              |   
+|                               ALL Ray processes started (pause here if vLLM not to be started)
+|-------------------------------------------------------------------------------------------------------------------------
+|                                                                              |
+|11. launch vLLM                                                               |
+|                                                                              |
+V (time)
 
 It is possible to specify both port and multicast group; the default multicast group is
 224.0.0.100 making it non-routable.
@@ -35,12 +55,8 @@ Additional parameters to the container runner can be passed through the --contai
 argument.
 
 When running inside SLURM and specifying the --slurm switch head and workers are automatically
-detected and run:
+detected.
 
-```
-srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
-     --num-gpus 8  Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
-```
 It is possible to have the script automatically configure vLLM using information from
 the SLURM environment by specifying the --auto parameter together with --slurm; note
 however that the configuration depends on the structure of the model e.g. the number
@@ -49,12 +65,24 @@ of parallel tensor layers must be divisible by the number of attention heads in 
 The script has been so far used only with Singularity and Apptainer on HPE/Cray systems but
 nothing is specific to the environment so it should work on any Linux cluster.
 
-Example:
+Examples:
+
+slurm: autodetect head and workers
+```
+srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
+     --num-gpus 8  Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
+```
+
+slurm + auto:
+```
+srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
+     --auto Qwen/Qwen3-30B-A3B
+```
 
 Run on head node, two nodes, one worker, one head, 8 GPUs per node:
 ```
 ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --head --num-gpus 8 \
-   --broadcast --num-workers 1 Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
+   --num-workers 1 Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
 ```
 Run on worker node:
 ```
