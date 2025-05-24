@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 #SBATCH --job-name=vLLM
 #SBATCH --account=pawsey0001-gpu
 #SBATCH --reservation=PAWSEY_GPU_COS_TESTING
