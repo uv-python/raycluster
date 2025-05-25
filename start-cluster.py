@@ -4,20 +4,21 @@
 
 # TODO: consider reading 'num_attention_heads' from config.json to automatically set
 #       tensor parallelism and number of gpus
+""" This script launches Ray and optionally vLLM from container.
 
-""" This script launches Ray and optionally vLLM.
+It can be started on head and worker nodes in any order.
 
 Because vLLM requires a running Ray instance to perform distributes inference,
 Ray must be started on each node before vLLM is started on the head node.
 And the Ray head node process must be started before the worker processes.
-The script first ensure that all the scripts have started on each node and
-the waits for all the Ray processes to be started before executing vLLM
+The script first ensures that all the scripts have started on each node and
+then waits for all the Ray processes to be started before executing vLLM
 on the head node.
-Workers use a multicast group to communicate their IP address, wait for
-and ACK from the head node which returns the port to use.
+Workers use a multicast group to communicate their IP address and wait for
+an ACK from the head node which returns the port to use.
 The head node starts Ray then sends the IP address to use to the workers
-which then start Ray passing the IP addressa and port received from the head
-process on the command line.
+which then start Ray passing the IP address and port received from the head
+process on the command line to the ray executable.
 
 Different parts of the scripts are executed only by the head or worker processes,
 according to the following sequence table.
@@ -26,67 +27,79 @@ according to the following sequence table.
 -------------------------------------------------------------------------------------------------------------------------
 |                                                                              |
 |1. parse paramerters                                                          |   parse parameters
-|2. wait on the multicast group to receive the address of each worker process  |    
-|3.                                                                            |   broadcast ip address
+|2. wait on the multicast group to receive the address of each worker process  |   broadcast ip address    
 |3. receive IP address of each worker                                          |                                           
 |4. send ACK to workers                                                        |
 |                                                                              |   receive ACK from head node
-|                                              All processes started           |                        
+|                                              All scripts started             |                        
 |-------------------------------------------------------------------------------------------------------------------------
 |5. launch Ray process                                                         |   wait to receive IP address of head node
 |6. broadcast address of head node                                             |
-|7. wait to receive IP address from workers                                    |   receive ID address of head node
+|7. wait to receive IP address from workers                                    |   receive IP address of head node
 |8.                                                                            |   launch Ray worker process
-|9.                                                                            |   broadcast ip address
-|10. receive IP address of each worker                                         |   pause execution (SIGSTOP)
+|9.*                                                                           |   broadcast IP address*
+|10. receive IP address of each worker*                                        |   pause execution (SIGSTOP)
 |                                                                              |   
 |                               ALL Ray processes started (pause here if vLLM not to be started)
 |-------------------------------------------------------------------------------------------------------------------------
 |                                                                              |
 |11. launch vLLM                                                               |
 |                                                                              |
-V (time)
+V (time)                                                                       | 
+
+(*): Resusing same code to sync, IP address is not used.
 
 It is possible to specify both port and multicast group; the default multicast group is
-224.0.0.100 making it non-routable.
+224.0.0.100 making it non-routable and the default port is 5001.
 All the command line parameters are documented, just run the script with  --help to see a list.
+The 'slurm-all-to-all-udp-test.py' script allows to check connectivity among all nodes
+in a cluster.
 
 Additional parameters to the container runner can be passed through the --container-parameters
 argument.
 
-When running inside SLURM and specifying the --slurm switch head and workers are automatically
-detected.
+When running inside SLURM the --slurm argument allows to automatically select head an workers nodes.
 
 It is possible to have the script automatically configure vLLM using information from
 the SLURM environment by specifying the --auto parameter together with --slurm; note
 however that the configuration depends on the structure of the model e.g. the number
 of parallel tensor layers must be divisible by the number of attention heads in the model.
+The 'num-gpu-from-attention-heads.py' can be used to compute the number of GPUs and number of parallel
+tensors for the model.
 
-The script has been so far used only with Singularity and Apptainer on HPE/Cray systems but
-nothing is specific to the environment so it should work on any Linux cluster.
 
 Examples:
 
 slurm: autodetect head and workers
 ```
-srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
-     --num-gpus 8  Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
+srun ./start-cluster.py singularity ./vllm_latest.sif --slurm \
+     --num-gpus 8  --mode lQwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
 ```
 
 slurm + auto:
 ```
-srun ./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --slurm \
-     --auto Qwen/Qwen3-30B-A3B
+srun ./start-cluster.py singularity ./vllm_latest.sif --slurm --auto --model Qwen/Qwen3-30B-A3B
 ```
 
 Run on head node, two nodes, one worker, one head, 8 GPUs per node:
 ```
-./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --head --num-gpus 8 \
-   --num-workers 1 Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
+./start-cluster.py singularity ./vllm_latest.sif --head --num-gpus 8 \
+   --num-workers 1 --model Qwen/Qwen3-30B-A3B --tensor-parallel-size 8 --pipeline-parallel-size 2
 ```
 Run on worker node:
 ```
-./start-cluster.py singularity ./vllm_rocm6.3.1_instinct_vllm0.8.3_20250415.sif --num-gpus 8
+./start-cluster.py singularity ./vllm_latest.sif --num-gpus 8
+
+SLURM job:
+```
+#!/usr/bin/env bash
+#SBATCH --job-name=vLLM
+#SBATCH --account=<account name>
+#SBATCH --time=1-00:00:00
+#SBATCH --nodes=2
+#SBATCH --partition=<partition name>
+module load singularity # ensure a container runner is available
+srun ./start-cluster.py singularity ./vllm_late --slurm --auto --model Qwen/Qwer3-30B-A3B
 ```
 """
 
@@ -111,7 +124,7 @@ class VLLMConfig:
     num_gpus: int = 0
 
 
-# kill process active in stopped state, useful
+# keep process active in stopped state, useful
 # to avoid SLURM to end job when current process is
 # done spawning backgound processes
 def pause():
@@ -123,6 +136,9 @@ def get_host_name(addr: str) -> str:
     return h.split(".")[0]
 
 
+# A worker node is randomly selecte to wait until the vLLM service
+# is available and then either invokes a user-provided script or
+# stores the service URL into a local file.
 def notify_loop(head, port, slurm, script="") -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         while s.connect_ex(
@@ -162,6 +178,7 @@ def vllm_config_from_slurm_job() -> VLLMConfig:
     return VLLMConfig(num_gpus, num_nodes, num_gpus)
 
 
+# Randomly select the node that will check on the availability of the vLLM service.
 def select_notifier_node(nodes, head_node) -> str:
     nn: str = head_node
     while nn == head_node:
@@ -169,11 +186,13 @@ def select_notifier_node(nodes, head_node) -> str:
     return nn
 
 
+# Abort execution printing an error end exiting.
 def abort(msg: str, exit_code: int = 1) -> None:
     print(msg, sys.stderr)
     sys.exit(exit_code)
 
 
+# Check if IP address is valid.
 def valid_ip_address(addr: str) -> bool:
     try:
         ipaddress.ip_address(addr)
@@ -182,10 +201,12 @@ def valid_ip_address(addr: str) -> bool:
     return True
 
 
+# Check if TCP/UPD port is valid.
 def valid_port(p: int) -> bool:
     return 1024 < p < 65536
 
 
+# Send Ray port number to workers, called by head process
 def notify_client(client: str, port: int, ray_port: int) -> None:
     try:
         sock: socket.socket = socket.socket(
@@ -196,6 +217,8 @@ def notify_client(client: str, port: int, ray_port: int) -> None:
         abort("Error creating socket")
 
 
+# Synchronously receive IP addressess from al workers on
+# the multicast group and send back port of ray process to each worker
 def sync_with_workers(
     mcast_group: str, port: int, num_workers: int, ray_port: int
 ) -> set[bytes]:
@@ -205,6 +228,9 @@ def sync_with_workers(
         )
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((mcast_group, port))
+        # add socket to multicast group by passing the multicast group
+        # address to setsockopt as 32 bit long integer ('l') packed
+        # into four bytes ('4s') converting from string (inet_aton)
         mreq: bytes = struct.pack(
             "4sl", socket.inet_aton(mcast_group), socket.INADDR_ANY
         )
@@ -212,7 +238,7 @@ def sync_with_workers(
         w: set[bytes] = set()
         # at each iteration a message from a worker is received; because the same
         # worker might be sending more than one message a 'set' is used to record
-        # which workers have already notified the head node to ensure one unique
+        # which workers have already notified the head node ggto ensure one unique
         # entry is stored
         while len(w) != num_workers:
             client = sock.recv(64)
@@ -226,8 +252,15 @@ def sync_with_workers(
         sock.close()
 
 
-def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 4) -> int:
-    TIMEOUT = 0.5  # seconds make it a configurable parameter?
+# Broadcast node IP address to multicast group and wait to receive Ray port from
+# head node as ACK
+def sync_with_head(
+    mcast_group: str,
+    port: int,
+    ray_ip_address,
+    ttl: int = 4,
+    select_timeout: float = 2,
+) -> int:
     try:
         sel: selectors.DefaultSelector = selectors.DefaultSelector()
         sock: socket.socket = socket.socket(
@@ -246,13 +279,13 @@ def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 4) ->
         sock2.bind(("0.0.0.0", port + 1))
         sel.register(sock2, selectors.EVENT_READ, data=None)
         rayport: bytes = bytes()
-        # at each iteration a new broadcast message is sent and an attempt
+        # At each iteration a new broadcast message is sent and an attempt
         # at receiving a response from the head node is performed.
-        # if the recvfrom call fails an exception is thrown, hence the need
+        # If the recvfrom call fails an exception is thrown, hence the need
         # for a try/except block
         while True:
             sock.sendto(msg.encode(), (mcast_group, port))
-            events = sel.select(timeout=TIMEOUT)
+            events = sel.select(timeout=select_timeout)
             if not events:
                 continue
             rayport, _ = sock2.recvfrom(128)
@@ -267,6 +300,8 @@ def sync_with_head(mcast_group: str, port: int, ray_ip_address, ttl: int = 4) ->
         sock2.close()
 
 
+# Receive message broadcast to multicast group.
+# Invoked from worker process to receive IP address of head node.
 def mcast_address_receive(mcast_group: str, port: int) -> str:
     try:
         sock: socket.socket = socket.socket(
@@ -286,6 +321,8 @@ def mcast_address_receive(mcast_group: str, port: int) -> str:
         sock.close()
 
 
+# Broadcast head node IP address. Called by head node after all worker process are started
+# and waiting for message.
 def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> None:
     try:
         sock: socket.socket = socket.socket(
@@ -299,6 +336,7 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> 
         sock.close()
 
 
+# Remove ANSI escape characters from text.
 def remove_ansi_escape_chars(buffer: str) -> str:
     ansi_escape: re.Pattern = re.compile(r"\x1b[^m]+m")
     t: str = ""
@@ -309,6 +347,11 @@ def remove_ansi_escape_chars(buffer: str) -> str:
         return ""
 
 
+# Extract current IP address from Ray output, note that it is not possible to
+# retrieve the address through other means beause it is not known which
+# NIC/IP address will be used.
+# The stdout output returned by subprocess functions is an array of bytes
+# containing ANSI escape sequences which need to be removed to simplify parsing.
 def extract_ip_address(buffer: bytes) -> str:
     """Parse Ray output text and extract IP address.
     `gethostbyname` won't work when there are multiple IP addresses
@@ -327,6 +370,7 @@ def extract_ip_address(buffer: bytes) -> str:
         return ""
 
 
+# Return the list of nodes running the SLURM job.
 def slurm_nodelist() -> tuple[bool, list[str]]:  # return <OK | NOT OK, value>
     OK: bool = True
     if "SLURM_JOB_NODELIST" not in os.environ:
@@ -342,10 +386,13 @@ def slurm_nodelist() -> tuple[bool, list[str]]:  # return <OK | NOT OK, value>
         return (not OK, [])
 
 
+# Check if current node is the head node. The head node is the first
+# node in the sorted sequence of SLURM nodes.
 def is_head_from_slurm_nodelist(nodelist: list[str]) -> bool:
     return ("nid" + nodelist[0]) == socket.gethostname()
 
 
+# Return the number of worker nodes.
 def num_workers_from_slurm_nodelist(nodelist: list[str]) -> int:
     return len(nodelist) - 1  # one is the head process
 
@@ -353,9 +400,8 @@ def num_workers_from_slurm_nodelist(nodelist: list[str]) -> int:
 #
 # -------------------------------------------------------------------------------
 #
-
-
 def main() -> None:
+    # ----------------------------------------------------------------------------
     # 1. Configure environment
     # check if ray alreay active:
     if "ROCR_VISIBLE_DEVICES" in os.environ:
@@ -363,6 +409,7 @@ def main() -> None:
 
     hostname = socket.gethostname()
 
+    # ----------------------------------------------------------------------------
     # 2. Parse arguments
     parser = argparse.ArgumentParser(
         prog="start-cluster",
@@ -438,6 +485,8 @@ def main() -> None:
     parser.add_argument(
         "--vllm-port", type=int, help="vLLM port"
     )  # need to know to run notification loop
+
+    # TTL: NOT USED YET
     parser.add_argument(
         "--ttl", type=int, help="TTL (number of hops) for multicast packets"
     )
@@ -452,7 +501,7 @@ def main() -> None:
             "WARNING: No model selected only Ray will be started not vLLM, to launch vLLM specify model through --model argument"
         )
 
-    #'unknown' are the parameters after `vllm serve'`
+    # 'vllm_args' are the parameters after `vllm serve'`
     if not app_args.slurm:
         try:
             _ = sub.check_output(
@@ -535,6 +584,7 @@ def main() -> None:
             ]
         )
 
+    # ----------------------------------------------------------------------------
     # 3. Sync workers with head
 
     # sync head with workers, head and workers can start in any order
@@ -546,18 +596,25 @@ def main() -> None:
     else:
         port = sync_with_head(mcast_address, mcast_port, "")
 
-    # SYNC PONT 1: ALL PROCESSES STARTED
+    # --------------------------------------------------------------------------
+    # SYNC PONT 1: ALL SCRIPTS STARTED ON ALL NODES
+    # --------------------------------------------------------------------------
+
     head_address: str = ""
 
+    # WORKERS: BLOCK and wait to receive head node IP address from head node
     # wait to receive address from head process
     if worker:
         head_address = mcast_address_receive(mcast_address, mcast_port)
+
+    # HEAD: continue execution
 
     # execution continues only on head node until the IP address has been extracted
     # from Ray's output and sent to workers which receive it in the line above,
     # note that because there are normally multiple IP addresses on the node, it it not
     # safe to retreive the IP address through other means
 
+    # ----------------------------------------------------------------------------
     # 4. Run Ray
 
     # execute ray with the container
@@ -603,11 +660,13 @@ def main() -> None:
     local_ip: str = extract_ip_address(out)
     print(f"IP Address: {local_ip}")
 
+    # --------------------------------------------------------------------------
     # 5. Broadcast IP address of head process
     # send head address to workers waiting at SYNC POINT 1
     if head:
         broadcast_ip_address(local_ip, mcast_address, mcast_port)
 
+    # --------------------------------------------------------------------------
     # 6. Re-sync
 
     # At this point, we know that all the worker processes have started but we do not know if
@@ -621,8 +680,11 @@ def main() -> None:
     else:
         _ = sync_with_head(mcast_address, mcast_port, local_ip)
 
-    # RAY STARTED ON ALL NODES: SYNC POINT 2
+    # --------------------------------------------------------------------------
+    # SYNC POINT 2: RAY STARTED ON ALL NODES
+    # --------------------------------------------------------------------------
 
+    # --------------------------------------------------------------------------
     # 7. Print IP addresses
     if worker:
         print(f"Head node address: {head_address}")
@@ -636,7 +698,8 @@ def main() -> None:
         [app_args.container_runner, "exec", app_args.container_image, "ray", "status"]
     )
 
-    # 8.1 Launch notification loop
+    # --------------------------------------------------------------------------
+    # 8. Launch notification loop on selected worker node
 
     # keep trying to connect to http://<head node>:<port> until
     # connection is established
@@ -656,18 +719,20 @@ def main() -> None:
                 app_args.notification_script,
             )
 
-    # 9. Launch vllm if model specified
+    # --------------------------------------------------------------------------
+    # 9. Launch vllm if '--model' specified
 
-    # if no arguments for vllm or worker do not launch vllm and pause execution
+    # if no model specified do not launch vllm and pause execution
     # when run from withing SLURM or exit
     if not app_args.model or worker:
         if not app_args.slurm:
             sys.exit(0)
         else:
             pause()
+
     # 9.1 Launch vllm
 
-    # Launch vllm on the head node
+    # launch vllm on the head node
     os.environ["VLLM_HOST_IP"] = local_ip
     vllm_cmdline: list[str] = []
     vllm_auto_args = []
@@ -714,6 +779,7 @@ def main() -> None:
         sys.exit(1)
 
 
+# Entry point
 # -------------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
