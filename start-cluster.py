@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Author: Ugo Varetto
 
-# TODO: consider reading 'num_attention_heads' from config.json to automatically set
-#       tensor parallelism and number of gpus
+# TODO: Consider using --block, instead of os.kill, for workers other than the one waiting
+#       for vLLM sto start.
 """ This script launches Ray and optionally vLLM from container.
 
 It can be started on head and worker nodes in any order.
@@ -201,6 +201,25 @@ def valid_ip_address(addr: str) -> bool:
     return True
 
 
+# Check that multicast group address is correct.
+def valid_mcast_address(addr: str) -> bool:
+    b = addr.split(".")
+    if len(b) != 4:
+        return False
+    try:
+        if int(b[0]) < 224 or int(b[0]) > 239:
+            return False
+        if int(b[1]) < 0 or int(b[1]) > 255:
+            return False
+        if int(b[2]) < 0 or int(b[2]) > 255:
+            return False
+        if int(b[3]) < 0 or int(b[3]) > 255:
+            return False
+        return True
+    except:
+        return False
+
+
 # Check if TCP/UPD port is valid.
 def valid_port(p: int) -> bool:
     return 1024 < p < 65536
@@ -302,7 +321,7 @@ def sync_with_head(
 
 # Receive message broadcast to multicast group.
 # Invoked from worker process to receive IP address of head node.
-def mcast_address_receive(mcast_group: str, port: int) -> str:
+def ip_address_receive(mcast_group: str, port: int) -> str:
     try:
         sock: socket.socket = socket.socket(
             socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
@@ -558,7 +577,7 @@ def main() -> None:
     )
     mcast_address: str = app_args.mcast_address or "224.0.0.100"  # non routable
     mcast_port: int = app_args.mcast_port or 5001
-    if not valid_ip_address(mcast_address):
+    if not valid_mcast_address(mcast_address):
         abort("Invalid multicast ip address")
 
     if not valid_port(mcast_port):
@@ -602,10 +621,9 @@ def main() -> None:
 
     head_address: str = ""
 
-    # WORKERS: BLOCK and wait to receive head node IP address from head node
-    # wait to receive address from head process
+    # WORKERS: BLOCK and wait for IP address from head node
     if worker:
-        head_address = mcast_address_receive(mcast_address, mcast_port)
+        head_address = ip_address_receive(mcast_address, mcast_port)
 
     # HEAD: continue execution
 
