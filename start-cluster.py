@@ -462,7 +462,10 @@ def main() -> None:
         help="Ray TCP port, for head only, workers will receive port from head",
     )
     parser.add_argument(
-        "--mcast-address", help="Multicast address, default is 224.0.0.100"
+        "--mcast-address",
+        help="Multicast address, default is 224.0.0.100, "
+        "two multicast addresses are used, the second one is "
+        "obtained by incrementing the las byte by one",
     )
     parser.add_argument("--mcast-port", help="Multicast port, default is 5001")
     parser.add_argument(
@@ -509,6 +512,8 @@ def main() -> None:
     parser.add_argument(
         "--ttl", type=int, help="TTL (number of hops) for multicast packets"
     )
+
+    parser.add_argument("--ip-address", help="Ray's --node-ip-address parameter")
 
     app_args, vllm_args = parser.parse_known_args()  # known, unknown
 
@@ -575,10 +580,15 @@ def main() -> None:
     num_gpus: int = app_args.num_gpus or (
         vllm_config.num_gpus if vllm_config.num_gpus > 0 else 1
     )
-    mcast_address: str = app_args.mcast_address or "224.0.0.100"  # non routable
-    mcast_port: int = app_args.mcast_port or 5001
-    if not valid_mcast_address(mcast_address):
+    # used by the workers to send their IP address to the head node
+    worker_to_head_mcast: str = app_args.mcast_address or "224.0.0.100"  # non routable
+    if not valid_mcast_address(worker_to_head_mcast):
         abort("Invalid multicast ip address")
+    ip: list[str] = worker_to_head_mcast.split(".")
+    ip[3] = str(int(ip[-1]) + 1)
+    # used by the head ndoe to sennd its IP address to the worker nodes
+    head_to_workers_mcast: str = ".".join(ip)
+    mcast_port: int = app_args.mcast_port or 5001
 
     if not valid_port(mcast_port):
         abort("Invalid multicast port")
@@ -611,9 +621,9 @@ def main() -> None:
     # the head node replies to each worker with the ray port to use
     workers: set[bytes] = set()
     if head:
-        workers = sync_with_workers(mcast_address, mcast_port, num_workers, port)
+        workers = sync_with_workers(worker_to_head_mcast, mcast_port, num_workers, port)
     else:
-        port = sync_with_head(mcast_address, mcast_port, "")
+        port = sync_with_head(worker_to_head_mcast, mcast_port, app_args.ip_address)
 
     # --------------------------------------------------------------------------
     # SYNC PONT 1: ALL SCRIPTS STARTED ON ALL NODES
@@ -623,7 +633,7 @@ def main() -> None:
 
     # WORKERS: BLOCK and wait for IP address from head node
     if worker:
-        head_address = ip_address_receive(mcast_address, mcast_port)
+        head_address = ip_address_receive(head_to_workers_mcast, mcast_port)
 
     # HEAD: continue execution
 
@@ -665,6 +675,8 @@ def main() -> None:
             str(head_address) + ":" + str(port),
         ]
 
+    if app_args.ip_address:
+        cmd_line += ["--node-ip-address", app_args.ip_address]
     # print(' '.join(cmd_line))
     out: bytes = bytes()
     try:
@@ -682,7 +694,7 @@ def main() -> None:
     # 5. Broadcast IP address of head process
     # send head address to workers waiting at SYNC POINT 1
     if head:
-        broadcast_ip_address(local_ip, mcast_address, mcast_port)
+        broadcast_ip_address(local_ip, head_to_workers_mcast, mcast_port)
 
     # --------------------------------------------------------------------------
     # 6. Re-sync
@@ -694,9 +706,9 @@ def main() -> None:
     # This time the worker and head processeswill send a messagesto after Ray has been started.
     # Instead of write additional code we can reuse what implemented above.
     if head:
-        workers = sync_with_workers(mcast_address, mcast_port, num_workers, port)
+        workers = sync_with_workers(worker_to_head_mcast, mcast_port, num_workers, port)
     else:
-        _ = sync_with_head(mcast_address, mcast_port, local_ip)
+        _ = sync_with_head(worker_to_head_mcast, mcast_port, local_ip)
 
     # --------------------------------------------------------------------------
     # SYNC POINT 2: RAY STARTED ON ALL NODES
@@ -711,10 +723,16 @@ def main() -> None:
         print("=" * 10)
         for w in workers:
             print(w.decode("utf-8"))
-
-    sub.call(
-        [app_args.container_runner, "exec", app_args.container_image, "ray", "status"]
-    )
+    if head:
+        sub.call(
+            [
+                app_args.container_runner,
+                "exec",
+                app_args.container_image,
+                "ray",
+                "status",
+            ]
+        )
 
     # --------------------------------------------------------------------------
     # 8. Launch notification loop on selected worker node
