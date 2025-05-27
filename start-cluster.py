@@ -47,6 +47,14 @@ according to the following sequence table.
 |                                                                              |
 V (time)                                                                       | 
 
+Two multicast groups are used:
+    1) for sending data from worker head
+    2) for sending data from head to worker
+
+(3) uses the same port but is generated from (1) by adding '1' to the last byte
+of the address.
+
+
 (*): Resusing same code to sync, IP address is not used.
 
 It is possible to specify both port and multicast group; the default multicast group is
