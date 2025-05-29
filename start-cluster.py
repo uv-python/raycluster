@@ -161,7 +161,7 @@ def notify_loop(head, port, slurm, script="") -> None:
     else:
         try:
             jid = os.environ["SLURM_JOB_ID"]
-            with open(f"{jid}-vllm-url", "w") as f:
+            with open(os.environ["HOME"] + f"/{jid}-vllm-url", "w") as f:
                 f.write(f"http://{head}:{port}")
         except Exception as e:
             abort(f"Cannot write to file - {str(e)}")
