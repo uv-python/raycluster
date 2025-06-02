@@ -366,17 +366,20 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> 
 
 # Check if NIC is associated with IP address.
 def nic_ip_address(nic: str) -> str:
-    if not nic:
-        return socket.gethostbyname(socket.gethostname())
-    ic = sub.check_output(["ifconfig", nic])
-    # note: ifconfig has changed the way output is printed over time
-    # older versions used 'inet <ip address>' newer version 'inet addr: <ip address>'
-    r = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
-    m = r.search(ic.decode("utf-8"))
-    if m is None:
+    try:
+        if not nic:
+            return socket.gethostbyname(socket.gethostname())
+        ic = sub.check_output(["ifconfig", nic], stderr=sub.STDOUT)
+        # note: ifconfig has changed the way output is printed over time
+        # older versions used 'inet <ip address>' newer version 'inet addr: <ip address>'
+        r = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
+        m = r.search(ic.decode("utf-8"))
+        if m is None:
+            return ""
+        else:
+            return m.group(1)
+    except Exception as _:
         return ""
-    else:
-        return m.group(1)
 
 
 # Extract IP address from NIC without resorting to 'ifconfig'
@@ -397,15 +400,22 @@ def nic_ip_address(nic: str) -> str:
 #         )
 
 
-# Return IP address of first NIC
+# Return list of network adapters.
+def nic_list() -> list[str]:
+    return os.listdir("/sys/class/net/")
+
+
+# Return IP address of first NIC.
 def get_first_ip_address(bonded: bool = True) -> str:
-    for n in os.listdir("/sys/class/net/"):
+    for n in nic_list():
         ip = nic_ip_address(n)
-        if not ip:
+        if not ip or ip == "127.0.0.1":
             continue
         if not bonded:
             if "bond" in str.lower(ip):
                 continue
+            else:
+                return ip
         else:
             return ip
     return ""
@@ -670,7 +680,7 @@ def main() -> None:
     # note that because there are normally multiple IP addresses on the node, it it not
     # safe to retreive the IP address through other means
 
-    ip_address: str = nic_ip_address(app_args.nic)
+    ip_address: str = get_first_ip_address(False)  # nic_ip_address(app_args.nic)
 
     # ----------------------------------------------------------------------------
     # 4. Run Ray
@@ -681,13 +691,13 @@ def main() -> None:
         "exec",
         app_args.container_image,
         "ray",
+        "start",
         "--node-ip-address",
         ip_address,
     ]
     cmd_line: list[str] = []
     if head:  # head node reaches this point before workers
         cmd_line = execute_ray + [
-            "start",
             "--head",
             "--port",
             str(port),
@@ -700,7 +710,6 @@ def main() -> None:
             cmd_line += ["--include-dashboard=False"]
     else:  # workers reach this point after head
         cmd_line = execute_ray + [
-            "start",
             "--num-gpus",
             str(num_gpus),
             "--address",
