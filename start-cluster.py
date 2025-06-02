@@ -3,7 +3,7 @@
 # Author: Ugo Varetto
 
 # TODO: Consider using --block, instead of os.kill, for workers other than the one waiting
-#       for vLLM sto start.
+# for vLLM sto start.
 """ This script launches Ray and optionally vLLM from container.
 
 It can be started on head and worker nodes in any order.
@@ -123,6 +123,7 @@ import signal
 from dataclasses import dataclass
 import random
 import selectors
+# import fcntl
 
 
 @dataclass
@@ -329,7 +330,7 @@ def sync_with_head(
 
 # Receive message broadcast to multicast group.
 # Invoked from worker process to receive IP address of head node.
-def ip_address_receive(mcast_group: str, port: int) -> str:
+def receive_ip_address(mcast_group: str, port: int) -> str:
     try:
         sock: socket.socket = socket.socket(
             socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP
@@ -363,38 +364,51 @@ def broadcast_ip_address(ip: str, mcast_group: str, port: int, ttl: int = 3) -> 
         sock.close()
 
 
-# Remove ANSI escape characters from text.
-def remove_ansi_escape_chars(buffer: str) -> str:
-    ansi_escape: re.Pattern = re.compile(r"\x1b[^m]+m")
-    t: str = ""
-    try:
-        t = ansi_escape.sub("", buffer)
-        return t
-    except:
+# Check if NIC is associated with IP address.
+def nic_ip_address(nic: str) -> str:
+    if not nic:
+        return socket.gethostbyname(socket.gethostname())
+    ic = sub.check_output(["ifconfig", nic])
+    # note: ifconfig has changed the way output is printed over time
+    # older versions used 'inet <ip address>' newer version 'inet addr: <ip address>'
+    r = re.compile(r"(\d+\.\d+\.\d+\.\d+)")
+    m = r.search(ic.decode("utf-8"))
+    if m is None:
         return ""
+    else:
+        return m.group(1)
 
 
-# Extract current IP address from Ray output, note that it is not possible to
-# retrieve the address through other means beause it is not known which
-# NIC/IP address will be used.
-# The stdout output returned by subprocess functions is an array of bytes
-# containing ANSI escape sequences which need to be removed to simplify parsing.
-def extract_ip_address(buffer: bytes) -> str:
-    """Parse Ray output text and extract IP address.
-    `gethostbyname` won't work when there are multiple IP addresses
-    bound to the same node.
-    """
-    # Doesn't work when more than one IP address in the same subnet
-    # return socket.gethostbyname(socket.getfqdn());
-    t: list[str] = []
-    t = remove_ansi_escape_chars(buffer.decode("utf-8")).split()
-    if not t:
-        return ""
-    try:
-        ip = t[t.index("IP:") + 1]
-        return ip
-    except:
-        return ""
+# Extract IP address from NIC without resorting to 'ifconfig'
+# ifconfig output has changed over time, this is a more rubust way
+# to extract the IP address of a NIC.
+# def ip_address_from_nic(nic: str = "") -> str:
+#     if not nic:
+#         return socket.gethostbyname(socket.gethostname())
+#     else:
+#         SIOCGIFADDR: int = 0x8915
+#         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#         return socket.inet_ntoa(
+#             fcntl.ioctl(
+#                 s.fileno(),
+#                 SIOCGIFADDR,
+#                 struct.pack("256s", nic[:15].encode()),
+#             )[20:24]
+#         )
+
+
+# Return IP address of first NIC
+def get_first_ip_address(bonded: bool = True) -> str:
+    for n in os.listdir("/sys/class/net/"):
+        ip = nic_ip_address(n)
+        if not ip:
+            continue
+        if not bonded:
+            if "bond" in str.lower(ip):
+                continue
+        else:
+            return ip
+    return ""
 
 
 # Return the list of nodes running the SLURM job.
@@ -521,6 +535,11 @@ def main() -> None:
         "--ttl", type=int, help="TTL (number of hops) for multicast packets"
     )
 
+    parser.add_argument(
+        "--nic",
+        help="Name of network card adapter, the IP address of this NIC will be assinged to the ray process",
+    )
+
     parser.add_argument("--ip-address", help="Ray's --node-ip-address parameter")
 
     app_args, vllm_args = parser.parse_known_args()  # known, unknown
@@ -592,9 +611,10 @@ def main() -> None:
     worker_to_head_mcast: str = app_args.mcast_address or "224.0.0.100"  # non routable
     if not valid_mcast_address(worker_to_head_mcast):
         abort("Invalid multicast ip address")
+    # compute multicast address used BY HEAD to send IP TO WORKERS by adding 1 to the
+    # last byte of the multicast address used BY WORKERS to send IP address TO HEAD
     ip: list[str] = worker_to_head_mcast.split(".")
     ip[3] = str(int(ip[-1]) + 1)
-    # used by the head ndoe to sennd its IP address to the worker nodes
     head_to_workers_mcast: str = ".".join(ip)
     mcast_port: int = app_args.mcast_port or 5001
 
@@ -641,7 +661,7 @@ def main() -> None:
 
     # WORKERS: BLOCK and wait for IP address from head node
     if worker:
-        head_address = ip_address_receive(head_to_workers_mcast, mcast_port)
+        head_address = receive_ip_address(head_to_workers_mcast, mcast_port)
 
     # HEAD: continue execution
 
@@ -649,6 +669,8 @@ def main() -> None:
     # from Ray's output and sent to workers which receive it in the line above,
     # note that because there are normally multiple IP addresses on the node, it it not
     # safe to retreive the IP address through other means
+
+    ip_address: str = nic_ip_address(app_args.nic)
 
     # ----------------------------------------------------------------------------
     # 4. Run Ray
@@ -659,6 +681,8 @@ def main() -> None:
         "exec",
         app_args.container_image,
         "ray",
+        "--node-ip-address",
+        ip_address,
     ]
     cmd_line: list[str] = []
     if head:  # head node reaches this point before workers
@@ -689,20 +713,19 @@ def main() -> None:
     out: bytes = bytes()
     try:
         out = sub.check_output(cmd_line)
-        print(remove_ansi_escape_chars(out.decode("utf-8")))
+        print(out.decode("utf-8"))
     except Exception as e:
         abort(str(e))
 
     # 4.1 Extract IP address
 
-    local_ip: str = extract_ip_address(out)
-    print(f"IP Address: {local_ip}")
+    print(f"IP Address: {ip_address}")
 
     # --------------------------------------------------------------------------
     # 5. Broadcast IP address of head process
     # send head address to workers waiting at SYNC POINT 1
     if head:
-        broadcast_ip_address(local_ip, head_to_workers_mcast, mcast_port)
+        broadcast_ip_address(ip_address, head_to_workers_mcast, mcast_port)
 
     # --------------------------------------------------------------------------
     # 6. Re-sync
@@ -716,7 +739,7 @@ def main() -> None:
     if head:
         workers = sync_with_workers(worker_to_head_mcast, mcast_port, num_workers, port)
     else:
-        _ = sync_with_head(worker_to_head_mcast, mcast_port, local_ip)
+        _ = sync_with_head(worker_to_head_mcast, mcast_port, ip_address)
 
     # --------------------------------------------------------------------------
     # SYNC POINT 2: RAY STARTED ON ALL NODES
@@ -777,7 +800,7 @@ def main() -> None:
     # 9.1 Launch vllm
 
     # launch vllm on the head node
-    os.environ["VLLM_HOST_IP"] = local_ip
+    os.environ["VLLM_HOST_IP"] = ip_address
     vllm_cmdline: list[str] = []
     vllm_auto_args = []
     vllm_args += ["--port", str(app_args.vllm_port if app_args.vllm_port else 8000)]
