@@ -15,7 +15,7 @@ def main():
     try:
         resp = requests.get(url)
         data = resp.json()  # Check the JSON Response Content documentation below
-        num_hidden_layers = int(data["num_attention_heads"])
+        num_hidden_layers = int(data["num_hidden_layers"])
         print(f"Number of hidden layers: {num_hidden_layers}")
         print(
             "Use a number equal or greater to this one for the -ngl argument of llama-cli"
