@@ -36,7 +36,8 @@ if __name__ == "__main__":
             "Print list of NICs when invoked with no argument "
             "or the IP address of the NIC specified on the command line.\n"
             "It possible to return the IP address of all adapters matching "
-            "a specific pattern by specifying --re <pattern e.g. 'hsn'>."
+            "a specific pattern by specifying --re <pattern e.g. 'hsn'>.\n"
+            "Use '--re *' to select all adapters."
         )
         sys.exit(0)
     if len(sys.argv) == 1:
